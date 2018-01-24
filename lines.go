@@ -1,6 +1,7 @@
 package linesd
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 
 const SERVICE_NAME = "linesd"
 const VERSION_NUMBER = "0.0.1"
+const ID_LINESD = "LD"
 
 var (
 	config = flag.String(
@@ -72,9 +74,9 @@ type Server struct {
 }
 
 func (s *Server) GenerateUniqueId(idType string) (string, time.Time) {
-	var i = (atomic.AddUint32(&s.count, 1)) % 0xFFFF
+	var i = (atomic.AddUint32(&s.count, 1)) % 0xFF
 	now := time.Now()
-	return fmt.Sprintf("%04d%02d%02d_%02d%02d_%010Xm%04Xi%04X_%s",
+	return fmt.Sprintf("%04d%02d%02d_%02d%02d_%010X_m%04X_i%02X_%s",
 		now.Year(),
 		now.Month(),
 		now.Day(),
@@ -98,6 +100,41 @@ func (t *Server) Initialize() {
 	t.hostname, _ = os.Hostname()
 	t.machineId, err = Lower16BitPrivateIP()
 	CheckFatal(err)
+}
+
+func (t *Server) ReadStdin() {
+	var err error
+
+	reader := bufio.NewReader(os.Stdin)
+	linesCounter := 0
+
+	for err == nil {
+		line, err := reader.ReadString('\n')
+
+		if err == io.EOF {
+			log.Println("EOF.")
+			break
+		}
+
+		CheckNotFatal(err)
+
+		line = strings.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+
+		log.Println("LINE:",
+			linesCounter,
+			"|",
+			line)
+
+		linesCounter += 1
+
+		if err != nil {
+			break
+		}
+	}
+
 }
 
 func (t *Server) RunForever() {
@@ -195,7 +232,11 @@ func (t *Server) RunForever() {
 		}
 	})
 
+	go t.ReadStdin()
+
 	log.Println("listen on:", *address)
+
 	err = http.ListenAndServe(*address, nil)
 	CheckFatal(err)
+
 }
