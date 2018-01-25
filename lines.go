@@ -36,7 +36,7 @@ var (
 
 	address = flag.String(
 		"address",
-		":9310",
+		":9400",
 		"HTTP server address")
 
 	env = flag.String(
@@ -144,32 +144,67 @@ func (t *Server) Initialize() {
 }
 
 func (t *Server) UploadBatch(batch *LinesBatch) {
-	s3Bucket := t.Config.AWSBucket
-	s3Key := fmt.Sprintf(
-		"%s/%s/%s/%s.json",
-		t.Config.awsKeyPrefixEnv,
-		batch.Name,
-		batch.BatchId[0:8],
-		batch.BatchId,
-	)
+	// S3:
+	if t.Config.AWSBucket != "" {
+		s3Bucket := t.Config.AWSBucket
+		s3Key := fmt.Sprintf(
+			"%s/%s/%s/%s.json",
+			t.Config.awsKeyPrefixEnv,
+			batch.Name,
+			batch.BatchId[0:8],
+			batch.BatchId,
+		)
 
-	_, _, err := S3PutBlob(
-		&t.Config.AWSRegion,
-		s3Bucket,
-		ToJsonBytes(batch),
-		s3Key,
-		CONTENT_TYPE_JSON,
-	)
-	CheckNotFatal(err)
+		_, _, err := S3PutBlob(
+			&t.Config.AWSRegion,
+			s3Bucket,
+			ToJsonBytes(batch),
+			s3Key,
+			CONTENT_TYPE_JSON,
+		)
+		CheckNotFatal(err)
 
-	if *is_show_batches {
-		log.Println("BATCH:", ToJsonString(batch))
+		if *is_show_batches {
+			log.Println("BATCH:", ToJsonString(batch))
+		}
+
+		if err == nil {
+			log.Println("=> Uploaded S3 Batch:", fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
+			t.Stats.Counters.WithLabelValues("log_lines_out", "").Add(float64(len(batch.Lines)))
+			t.Stats.Counters.WithLabelValues("log_batches_out", "").Inc()
+		} else {
+			t.Stats.Counters.WithLabelValues("log_lines_out_err", CleanupStringASCII(err.Error(), true)).Add(float64(len(batch.Lines)))
+			t.Stats.Counters.WithLabelValues("log_batches_out_err", CleanupStringASCII(err.Error(), true)).Inc()
+		}
 	}
 
-	if err == nil {
-		log.Println("=> Uploaded Batch:", fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
-		t.Stats.Counters.WithLabelValues("log_batches_out", "").Inc()
-		t.Stats.Counters.WithLabelValues("log_lines_out", "").Add(float64(len(batch.Lines)))
+	// ES:
+	if t.Config.AWSElasticSearchURL != "" {
+		items := map[string]interface{}{}
+		for lc, line := range batch.Lines {
+			itemId := fmt.Sprintf("%s-%06d", batch.BatchId, lc)
+			item := map[string]interface{}{
+				"lc":        lc,
+				"timestamp": batch.TimestampStart, // extrapolate the time from end and start
+				"hostname":  t.hostname,
+				"stream":    batch.Name,
+				"line":      *line,
+			}
+			items[itemId] = item
+		}
+		err := ElasticSearchPut(
+			t.Config.AWSElasticSearchURL,
+			"tlines",
+			*env,
+			"tline",
+			items)
+		CheckNotFatal(err)
+
+		if err == nil {
+			t.Stats.Counters.WithLabelValues("log_batches_es_ok", "").Inc()
+		} else {
+			t.Stats.Counters.WithLabelValues("log_batches_es_err", CleanupStringASCII(err.Error(), true)).Inc()
+		}
 	}
 }
 
