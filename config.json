@@ -2,4 +2,11 @@
     "aws_region": "us-west-2"
     , "aws_bucket": "linesd"
     , "aws_key_prefix": "logs"
+
+    , "streams" : [
+        {
+            "name": "a"
+            , "address": ":9400"
+        }
+    ]
 }

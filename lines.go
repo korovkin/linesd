@@ -95,6 +95,8 @@ func (t *Server) Initialize() {
 	CheckFatal(err)
 	t.Config.awsKeyPrefixEnv = t.Config.AWSKeyPrefix + "/" + *env
 
+	t.conc = limiter.NewConcurrencyLimiter(*conc_limit)
+
 	log.Println("config:", ToJsonString(t.Config))
 
 	t.hostname, _ = os.Hostname()
@@ -116,7 +118,7 @@ func (t *Server) ReadStdin() {
 			break
 		}
 
-		CheckNotFatal(err)
+		CheckFatal(err)
 
 		line = strings.TrimSpace(line)
 		if len(line) == 0 {
