@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"io/ioutil"
-	"log"
 	"os"
 	"time"
 
@@ -26,11 +25,11 @@ func S3PutLocalFile(
 	remoteFilename string,
 	contentType string) (*s3.PutObjectOutput, string, error) {
 
-	S := time.Now()
-	defer func() {
-		DT := time.Since(S)
-		log.Println("S3PutLocalFile: DT:", DT.Seconds(), bucketName, remoteFilename)
-	}()
+	// S := time.Now()
+	// defer func() {
+	// 	DT := time.Since(S)
+	// 	log.Println("S3PutLocalFile: DT:", DT.Seconds(), bucketName, remoteFilename)
+	// }()
 
 	var res *s3.PutObjectOutput = nil
 
@@ -82,13 +81,13 @@ func S3PutBlob(
 	contentType string,
 ) (*s3.PutObjectOutput, string, error) {
 
-	S := time.Now()
-	defer func() {
-		log.Println(
-			"S3PutBlob:",
-			"DT:",
-			time.Since(S))
-	}()
+	// S := time.Now()
+	// defer func() {
+	// 	log.Println(
+	// 		"S3PutBlob:",
+	// 		"DT:",
+	// 		time.Since(S))
+	// }()
 
 	var res *s3.PutObjectOutput = nil
 	tfilesURL := ""
@@ -136,13 +135,13 @@ func S3PutReader(
 	remoteFilename string,
 	contentType string,
 ) (*s3.PutObjectOutput, error) {
-	S := time.Now()
-	defer func() {
-		log.Println(
-			"S3PutReader:",
-			"DT:",
-			time.Since(S))
-	}()
+	// S := time.Now()
+	// defer func() {
+	// 	log.Println(
+	// 		"S3PutReader:",
+	// 		"DT:",
+	// 		time.Since(S))
+	// }()
 
 	var res *s3.PutObjectOutput = nil
 
@@ -219,11 +218,11 @@ func S3Get(region *string, bucketName string, key string) ([]byte, string, error
 	var content []byte
 	var contentType string = ""
 
-	S := time.Now()
-	defer func() {
-		DT := time.Since(S)
-		log.Println("S3Get: DT:", DT.Seconds(), bucketName, key)
-	}()
+	// S := time.Now()
+	// defer func() {
+	// 	DT := time.Since(S)
+	// 	log.Println("S3Get: DT:", DT.Seconds(), bucketName, key)
+	// }()
 
 	sess, err := session.NewSession(&aws.Config{Region: aws.String(*region)})
 	CheckNotFatal(err)

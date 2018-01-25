@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -23,7 +24,7 @@ import (
 
 const SERVICE_NAME = "linesd"
 const VERSION_NUMBER = "0.0.1"
-const ID_LINESD = "LD"
+const ID_LINESD = "LINESD"
 
 var (
 	config = flag.String(
@@ -52,16 +53,29 @@ var (
 		"concurrency limit for processing the lines")
 )
 
+type ConfigStream struct {
+	Name string `json:"name"`
+}
+
 type Config struct {
-	AWSRegion    string `json:"aws_region"`
-	AWSBucket    string `json:"aws_bucket"`
-	AWSKeyPrefix string `json:"aws_key_prefix"`
+	AWSRegion    string                  `json:"aws_region"`
+	AWSBucket    string                  `json:"aws_bucket"`
+	AWSKeyPrefix string                  `json:"aws_key_prefix"`
+	Streams      map[string]ConfigStream `json:"streams"`
 
 	awsKeyPrefixEnv string
 }
 
 type Stats struct {
 	Counters *prometheus.CounterVec `json:"-"`
+}
+
+type LinesBatch struct {
+	Name           string    `json:"name"`
+	BatchId        string    `json:"batch_id"`
+	TimestampStart int64     `json:"ts_start"`
+	TimestampEnd   int64     `json:"ts_end"`
+	Lines          []*string `json:"lines"`
 }
 
 type Server struct {
@@ -71,12 +85,13 @@ type Server struct {
 	count     uint32
 	hostname  string
 	machineId uint16
+	Data      map[string]*LinesBatch
 }
 
 func (s *Server) GenerateUniqueId(idType string) (string, time.Time) {
-	var i = (atomic.AddUint32(&s.count, 1)) % 0xFF
+	var i = (atomic.AddUint32(&s.count, 1)) % 0xFFFF
 	now := time.Now()
-	return fmt.Sprintf("%04d%02d%02d_%02d%02d_%010X_m%04X_i%02X_%s",
+	return fmt.Sprintf("%04d%02d%02d_%02d%02d_%010X_m%04X_i%04X_%s",
 		now.Year(),
 		now.Month(),
 		now.Day(),
@@ -99,19 +114,51 @@ func (t *Server) Initialize() {
 
 	log.Println("config:", ToJsonString(t.Config))
 
+	t.Data = map[string]*LinesBatch{}
+
 	t.hostname, _ = os.Hostname()
 	t.machineId, err = Lower16BitPrivateIP()
 	CheckFatal(err)
 }
 
+func (t *Server) UploadBatch(batch *LinesBatch) {
+	s3Bucket := t.Config.AWSBucket
+	s3Key := fmt.Sprintf(
+		"%s/%s/%s.json",
+		t.Config.awsKeyPrefixEnv,
+		batch.Name,
+		batch.BatchId,
+	)
+
+	_, _, err := S3PutBlob(
+		&t.Config.AWSRegion,
+		s3Bucket,
+		ToJsonBytes(batch),
+		s3Key,
+		CONTENT_TYPE_JSON,
+	)
+	CheckNotFatal(err)
+
+	if err == nil {
+		log.Println("=> Uploaded Batch:", fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
+	}
+}
+
 func (t *Server) ReadStdin() {
 	var err error
+
+	streamAddress := "stdin"
+	stream, ok := t.Config.Streams[streamAddress]
+	if !ok {
+		log.Fatalln("no stdin stream")
+	}
 
 	reader := bufio.NewReader(os.Stdin)
 	linesCounter := 0
 
 	for err == nil {
 		line, err := reader.ReadString('\n')
+		now := time.Now()
 
 		if err == io.EOF {
 			log.Println("EOF.")
@@ -125,10 +172,42 @@ func (t *Server) ReadStdin() {
 			continue
 		}
 
-		log.Println("LINE:",
-			linesCounter,
-			"|",
-			line)
+		// fmt.Println("LINE:",
+		// 	linesCounter,
+		// 	"|",
+		// 	line)
+
+		batch := t.Data[streamAddress]
+		if batch == nil {
+			batch = &LinesBatch{}
+			id, now := t.GenerateUniqueId(ID_LINESD)
+			batch.Name = stream.Name
+			batch.BatchId = id
+			batch.TimestampStart = now.Unix()
+			batch.TimestampEnd = now.Unix()
+			t.Data[streamAddress] = batch
+		}
+
+		if batch.Lines == nil {
+			batch.Lines = []*string{}
+		}
+
+		batch.Lines = append(batch.Lines, &line)
+		batch.TimestampEnd = now.Unix()
+		isBatchDone := false
+
+		if !isBatchDone && len(batch.Lines) > 3 {
+			isBatchDone = true
+		} else if math.Abs(float64(batch.TimestampEnd)-float64(batch.TimestampStart)) >= 60.0 {
+			isBatchDone = true
+		}
+
+		if isBatchDone {
+			t.Data[streamAddress] = nil
+			t.conc.Execute(func() {
+				t.UploadBatch(batch)
+			})
+		}
 
 		linesCounter += 1
 
@@ -136,7 +215,6 @@ func (t *Server) ReadStdin() {
 			break
 		}
 	}
-
 }
 
 func (t *Server) RunForever() {
@@ -234,11 +312,20 @@ func (t *Server) RunForever() {
 		}
 	})
 
-	go t.ReadStdin()
+	go func() {
+		err = http.ListenAndServe(*address, nil)
+		CheckFatal(err)
+	}()
+
+	t.ReadStdin()
+
+	for streamAddress, batch := range t.Data {
+		log.Println("=> Finalize:", streamAddress)
+		t.UploadBatch(batch)
+	}
+
+	t.conc.Wait()
 
 	log.Println("listen on:", *address)
-
-	err = http.ListenAndServe(*address, nil)
-	CheckFatal(err)
 
 }
