@@ -148,8 +148,10 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 	if t.Config.AWSBucket != "" {
 		s3Bucket := t.Config.AWSBucket
 		s3Key := fmt.Sprintf(
-			"%s/%s/%s/%s.json",
+			"%s/%s/%s/%s/%s/%s.json",
 			t.Config.awsKeyPrefixEnv,
+			*env,
+			t.hostname,
 			batch.Name,
 			batch.BatchId[0:8],
 			batch.BatchId,
@@ -169,7 +171,7 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 		}
 
 		if err == nil {
-			log.Println("=> Uploaded S3 Batch:", fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
+			log.Println("=> TLINES S3 UPLOADED:", fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
 			t.Stats.Counters.WithLabelValues("log_lines_out", "").Add(float64(len(batch.Lines)))
 			t.Stats.Counters.WithLabelValues("log_batches_out", "").Inc()
 		} else {
@@ -196,11 +198,12 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 			t.Config.AWSElasticSearchURL,
 			"tlines",
 			*env,
-			"tline",
+			"line",
 			items)
 		CheckNotFatal(err)
 
 		if err == nil {
+			log.Println("=> TLINES ES UPLOADED:", batch.BatchId)
 			t.Stats.Counters.WithLabelValues("log_batches_es_ok", "").Inc()
 		} else {
 			t.Stats.Counters.WithLabelValues("log_batches_es_err", CleanupStringASCII(err.Error(), true)).Inc()

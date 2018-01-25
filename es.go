@@ -35,9 +35,9 @@ func ElasticSearchPut(endpoint string, indexPrefix string, env string, itemType 
 		requestBody.WriteString(ToJsonStringNoIndent(doc))
 		requestBody.WriteString("\n")
 
-		log.Println("ES:",
-			ToJsonStringNoIndent(update),
-			ToJsonStringNoIndent(doc))
+		// log.Println("ES:",
+		// 	ToJsonStringNoIndent(update),
+		// 	ToJsonStringNoIndent(doc))
 	}
 
 	req, err := http.NewRequest("POST", endpoint+"/_bulk", requestBody)
@@ -61,12 +61,18 @@ func ElasticSearchPut(endpoint string, indexPrefix string, env string, itemType 
 	CheckNotFatal(err)
 
 	if responseBodyBytes != nil {
-		log.Println("ES: _bulk ERROR:", string(responseBodyBytes))
 		esResp := map[string]interface{}{}
 		err = json.Unmarshal(responseBodyBytes, &esResp)
 		CheckNotFatal(err)
 
-		log.Println("ES: RESPONSE:", ToJsonString(esResp))
+		if resp.StatusCode != 200 {
+			log.Println("ES: RESPONSE:",
+				resp.StatusCode,
+				resp.Status,
+				string(responseBodyBytes),
+				ToJsonString(esResp),
+			)
+		}
 	}
 
 	return err
