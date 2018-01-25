@@ -148,9 +148,8 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 	if t.Config.AWSBucket != "" {
 		s3Bucket := t.Config.AWSBucket
 		s3Key := fmt.Sprintf(
-			"%s/%s/%s/%s/%s/%s.json",
+			"%s/%s/%s/%s/%s.json",
 			t.Config.awsKeyPrefixEnv,
-			*env,
 			t.hostname,
 			batch.Name,
 			batch.BatchId[0:8],
