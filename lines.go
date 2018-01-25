@@ -17,9 +17,6 @@ import (
 	"github.com/korovkin/limiter"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-
-	_ "github.com/aws/aws-sdk-go/aws"
-	_ "github.com/aws/aws-sdk-go/aws/session"
 )
 
 const SERVICE_NAME = "linesd"
@@ -51,6 +48,29 @@ var (
 		"conc_limit",
 		8,
 		"concurrency limit for processing the lines")
+
+	is_log_lines = flag.Bool(
+		"is_log_lines",
+		false,
+		"log lines to stdout",
+	)
+
+	is_show_batches = flag.Bool(
+		"is_show_batches",
+		false,
+		"print the uploaded batches")
+
+	batch_size_seconds = flag.Int(
+		"batch_size_seconds",
+		60,
+		"batch size in seconds",
+	)
+
+	batch_size_lines = flag.Int(
+		"batch_size_lines",
+		100,
+		"batch size in lines",
+	)
 )
 
 type ConfigStream struct {
@@ -58,10 +78,11 @@ type ConfigStream struct {
 }
 
 type Config struct {
-	AWSRegion    string                  `json:"aws_region"`
-	AWSBucket    string                  `json:"aws_bucket"`
-	AWSKeyPrefix string                  `json:"aws_key_prefix"`
-	Streams      map[string]ConfigStream `json:"streams"`
+	AWSRegion           string                  `json:"aws_region"`
+	AWSBucket           string                  `json:"aws_bucket"`
+	AWSKeyPrefix        string                  `json:"aws_key_prefix"`
+	AWSElasticSearchURL string                  `json:"aws_elastic_search"`
+	Streams             map[string]ConfigStream `json:"streams"`
 
 	awsKeyPrefixEnv string
 }
@@ -88,10 +109,10 @@ type Server struct {
 	Data      map[string]*LinesBatch
 }
 
-func (s *Server) GenerateUniqueId(idType string) (string, time.Time) {
+func (s *Server) GenerateUniqueId(idType string) (string, string, time.Time) {
 	var i = (atomic.AddUint32(&s.count, 1)) % 0xFFFF
 	now := time.Now()
-	return fmt.Sprintf("%04d%02d%02d_%02d%02d_%010X_m%04X_i%04X_%s",
+	id := fmt.Sprintf("%04d%02d%02d_%02d%02d_%010X_m%04X_i%04X_%s",
 		now.Year(),
 		now.Month(),
 		now.Day(),
@@ -100,7 +121,8 @@ func (s *Server) GenerateUniqueId(idType string) (string, time.Time) {
 		now.Nanosecond(),
 		s.machineId,
 		i,
-		idType), now
+		idType)
+	return id, id[0:8], now
 }
 
 func (t *Server) Initialize() {
@@ -124,9 +146,10 @@ func (t *Server) Initialize() {
 func (t *Server) UploadBatch(batch *LinesBatch) {
 	s3Bucket := t.Config.AWSBucket
 	s3Key := fmt.Sprintf(
-		"%s/%s/%s.json",
+		"%s/%s/%s/%s.json",
 		t.Config.awsKeyPrefixEnv,
 		batch.Name,
+		batch.BatchId[0:8],
 		batch.BatchId,
 	)
 
@@ -139,8 +162,14 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 	)
 	CheckNotFatal(err)
 
+	if *is_show_batches {
+		log.Println("BATCH:", ToJsonString(batch))
+	}
+
 	if err == nil {
 		log.Println("=> Uploaded Batch:", fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
+		t.Stats.Counters.WithLabelValues("log_batches_out", "").Inc()
+		t.Stats.Counters.WithLabelValues("log_lines_out", "").Add(float64(len(batch.Lines)))
 	}
 }
 
@@ -172,20 +201,25 @@ func (t *Server) ReadStdin() {
 			continue
 		}
 
-		// fmt.Println("LINE:",
-		// 	linesCounter,
-		// 	"|",
-		// 	line)
+		if *is_log_lines {
+			fmt.Println("LINE:",
+				linesCounter,
+				"|",
+				line)
+		}
+
+		t.Stats.Counters.WithLabelValues("log_lines_in", "").Inc()
 
 		batch := t.Data[streamAddress]
 		if batch == nil {
 			batch = &LinesBatch{}
-			id, now := t.GenerateUniqueId(ID_LINESD)
+			id, _, now := t.GenerateUniqueId(ID_LINESD)
 			batch.Name = stream.Name
 			batch.BatchId = id
 			batch.TimestampStart = now.Unix()
 			batch.TimestampEnd = now.Unix()
 			t.Data[streamAddress] = batch
+			t.Stats.Counters.WithLabelValues("log_batches_in", "").Inc()
 		}
 
 		if batch.Lines == nil {
@@ -196,9 +230,9 @@ func (t *Server) ReadStdin() {
 		batch.TimestampEnd = now.Unix()
 		isBatchDone := false
 
-		if !isBatchDone && len(batch.Lines) > 3 {
+		if *batch_size_lines > 0 && !isBatchDone && len(batch.Lines) > *batch_size_lines {
 			isBatchDone = true
-		} else if math.Abs(float64(batch.TimestampEnd)-float64(batch.TimestampStart)) >= 60.0 {
+		} else if *batch_size_seconds > 0 && math.Abs(float64(batch.TimestampEnd)-float64(batch.TimestampStart)) >= float64(*batch_size_seconds) {
 			isBatchDone = true
 		}
 
@@ -234,18 +268,21 @@ func (t *Server) RunForever() {
 		return
 	}
 
-	server := &Server{}
-	server.Initialize()
+	if *batch_size_lines == 0 && *batch_size_seconds == 0 {
+		log.Fatalln("must pick at least one of batch_size_seconds / batch_size_lines")
+	}
+
+	t.Initialize()
 
 	// stats:
 	labels := []string{"name", "arg"}
-	server.Stats.Counters = prometheus.NewCounterVec(
+	t.Stats.Counters = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: SERVICE_NAME + "_counters",
 			Help: "counters"},
 		labels,
 	)
-	err = prometheus.Register(server.Stats.Counters)
+	err = prometheus.Register(t.Stats.Counters)
 	CheckFatal(err)
 
 	VersionExport := prometheus.NewCounterVec(
@@ -278,9 +315,9 @@ func (t *Server) RunForever() {
 			}
 			log.Println("ERROR:", errorString)
 			http.Error(c, "error: "+errorString, http.StatusBadRequest)
-			server.Stats.Counters.WithLabelValues("request_error"+path, errorString).Inc()
+			t.Stats.Counters.WithLabelValues("request_error"+path, errorString).Inc()
 		} else {
-			server.Stats.Counters.WithLabelValues("request_ok"+path, "").Inc()
+			t.Stats.Counters.WithLabelValues("request_ok"+path, "").Inc()
 		}
 	}
 
@@ -317,15 +354,18 @@ func (t *Server) RunForever() {
 		CheckFatal(err)
 	}()
 
+	defer func() {
+		// always drain the batches
+		for streamAddress, batch := range t.Data {
+			log.Println("=> Finalize:", streamAddress)
+			t.UploadBatch(batch)
+		}
+
+		t.conc.Wait()
+	}()
+
+	// read stdin:
 	t.ReadStdin()
 
-	for streamAddress, batch := range t.Data {
-		log.Println("=> Finalize:", streamAddress)
-		t.UploadBatch(batch)
-	}
-
-	t.conc.Wait()
-
 	log.Println("listen on:", *address)
-
 }
