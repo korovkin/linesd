@@ -200,9 +200,15 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 		items := map[string]interface{}{}
 		for lc, line := range batch.Lines {
 			itemId := fmt.Sprintf("%s-%06d", batch.BatchId, lc)
+
+			a := math.Min(float64(batch.TimestampStart), float64(batch.TimestampEnd))
+			b := math.Max(float64(batch.TimestampStart), float64(batch.TimestampEnd))
+			dt := math.Abs(b-a) * float64(lc) / float64(len(batch.Lines))
+			timestamp := a + dt
+
 			item := map[string]interface{}{
 				"lc":        lc,
-				"timestamp": batch.TimestampStart, // extrapolate the time from end and start
+				"timestamp": int64(timestamp),
 				"hostname":  t.hostname,
 				"stream":    batch.Name,
 				"line":      *line,
