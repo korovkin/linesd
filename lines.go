@@ -134,7 +134,7 @@ func (t *Server) Initialize() {
 
 	t.conc = limiter.NewConcurrencyLimiter(*conc_limit)
 
-	log.Println("config:", ToJsonString(t.Config))
+	log.Println("LINESD: config:", ToJsonString(t.Config))
 
 	t.Data = map[string]*LinesBatch{}
 
@@ -170,7 +170,7 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 		}
 
 		if err == nil {
-			log.Println("=> TLINES S3 UPLOADED:", fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
+			log.Println("LINESD: S3 UPLOADED:", fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
 			t.Stats.Counters.WithLabelValues("log_lines_out", "").Add(float64(len(batch.Lines)))
 			t.Stats.Counters.WithLabelValues("log_batches_out", "").Inc()
 		} else {
@@ -202,7 +202,7 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 		CheckNotFatal(err)
 
 		if err == nil {
-			log.Println("=> TLINES ES UPLOADED:", batch.BatchId)
+			log.Println("LINESD: ES UPLOADED:", batch.BatchId)
 			t.Stats.Counters.WithLabelValues("log_batches_es_ok", "").Inc()
 		} else {
 			t.Stats.Counters.WithLabelValues("log_batches_es_err", CleanupStringASCII(err.Error(), true)).Inc()
@@ -227,7 +227,7 @@ func (t *Server) ReadStdin() {
 		now := time.Now()
 
 		if err == io.EOF {
-			log.Println("EOF.")
+			log.Println("LINESD: EOF.")
 			break
 		}
 
@@ -309,8 +309,6 @@ func (t *Server) RunForever() {
 		log.Fatalln("must pick at least one of batch_size_seconds / batch_size_lines")
 	}
 
-	t.Initialize()
-
 	// stats:
 	labels := []string{"name", "arg"}
 	t.Stats.Counters = prometheus.NewCounterVec(
@@ -387,6 +385,7 @@ func (t *Server) RunForever() {
 	})
 
 	go func() {
+		log.Println("=> LINESD: METRICS ADDRESS:", *address)
 		err = http.ListenAndServe(*address, nil)
 		CheckFatal(err)
 	}()
@@ -394,7 +393,7 @@ func (t *Server) RunForever() {
 	defer func() {
 		// always drain the batches
 		for streamAddress, batch := range t.Data {
-			log.Println("=> Finalize:", streamAddress)
+			log.Println("=> LINESD: FINALIZE:", streamAddress)
 			t.UploadBatch(batch)
 		}
 
@@ -404,5 +403,4 @@ func (t *Server) RunForever() {
 	// read stdin:
 	t.ReadStdin()
 
-	log.Println("listen on:", *address)
 }
