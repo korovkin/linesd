@@ -10,10 +10,12 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/dustin/go-humanize"
 	"github.com/korovkin/limiter"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -62,14 +64,20 @@ var (
 
 	batch_size_seconds = flag.Int(
 		"batch_size_seconds",
-		60,
+		180,
 		"batch size in seconds",
 	)
 
 	batch_size_lines = flag.Int(
 		"batch_size_lines",
-		100,
+		5000,
 		"batch size in lines",
+	)
+
+	progress = flag.Int(
+		"progress",
+		100,
+		"progress debug prints",
 	)
 )
 
@@ -89,6 +97,7 @@ type Config struct {
 
 type Stats struct {
 	Counters *prometheus.CounterVec `json:"-"`
+	Gauges   *prometheus.GaugeVec   `json:"-"`
 }
 
 type LinesBatch struct {
@@ -107,6 +116,8 @@ type Server struct {
 	hostname  string
 	machineId uint16
 	Data      map[string]*LinesBatch
+
+	linesCounter int64
 }
 
 func (s *Server) GenerateUniqueId(idType string) (string, string, time.Time) {
@@ -144,6 +155,11 @@ func (t *Server) Initialize() {
 }
 
 func (t *Server) UploadBatch(batch *LinesBatch) {
+
+	if batch == nil {
+		return
+	}
+
 	// S3:
 	if t.Config.AWSBucket != "" {
 		s3Bucket := t.Config.AWSBucket
@@ -197,7 +213,7 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 			t.Config.AWSElasticSearchURL,
 			"tlines",
 			*env,
-			"line",
+			fmt.Sprintf("%s-%s", t.hostname, batch.Name),
 			items)
 		CheckNotFatal(err)
 
@@ -210,80 +226,122 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 	}
 }
 
-func (t *Server) ReadStdin() {
-	var err error
+func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *string) {
+	now := time.Now()
 
-	streamAddress := "stdin"
-	stream, ok := t.Config.Streams[streamAddress]
-	if !ok {
-		log.Fatalln("no stdin stream")
+	if line != nil && *is_log_lines {
+		fmt.Println("LINE:",
+			t.linesCounter,
+			"|",
+			line)
 	}
 
-	reader := bufio.NewReader(os.Stdin)
-	linesCounter := 0
+	t.Stats.Counters.WithLabelValues("log_lines_in", "").Inc()
 
-	for err == nil {
-		line, err := reader.ReadString('\n')
-		now := time.Now()
-
-		if err == io.EOF {
-			log.Println("LINESD: EOF.")
-			break
-		}
-
-		CheckFatal(err)
-
-		line = strings.TrimSpace(line)
-		if len(line) == 0 {
-			continue
-		}
-
-		if *is_log_lines {
-			fmt.Println("LINE:",
-				linesCounter,
-				"|",
-				line)
-		}
-
-		t.Stats.Counters.WithLabelValues("log_lines_in", "").Inc()
-
-		batch := t.Data[streamAddress]
-		if batch == nil {
-			batch = &LinesBatch{}
-			id, _, now := t.GenerateUniqueId(ID_LINESD)
-			batch.Name = stream.Name
-			batch.BatchId = id
-			batch.TimestampStart = now.Unix()
-			batch.TimestampEnd = now.Unix()
-			t.Data[streamAddress] = batch
-			t.Stats.Counters.WithLabelValues("log_batches_in", "").Inc()
-		}
-
-		if batch.Lines == nil {
-			batch.Lines = []*string{}
-		}
-
-		batch.Lines = append(batch.Lines, &line)
+	batch := t.Data[*streamAddress]
+	if batch == nil {
+		batch = &LinesBatch{}
+		id, _, now := t.GenerateUniqueId(ID_LINESD)
+		batch.Name = stream.Name
+		batch.BatchId = id
+		batch.TimestampStart = now.Unix()
 		batch.TimestampEnd = now.Unix()
-		isBatchDone := false
+		t.Data[*streamAddress] = batch
+		t.Stats.Counters.WithLabelValues("log_batches_in", "").Inc()
+	}
 
-		if *batch_size_lines > 0 && !isBatchDone && len(batch.Lines) > *batch_size_lines {
-			isBatchDone = true
-		} else if *batch_size_seconds > 0 && math.Abs(float64(batch.TimestampEnd)-float64(batch.TimestampStart)) >= float64(*batch_size_seconds) {
-			isBatchDone = true
+	if batch.Lines == nil {
+		batch.Lines = []*string{}
+	}
+
+	if line != nil {
+		batch.Lines = append(batch.Lines, line)
+		batch.TimestampEnd = now.Unix()
+	}
+	isBatchDone := false
+
+	if *batch_size_lines > 0 && !isBatchDone &&
+		len(batch.Lines) > *batch_size_lines {
+
+		isBatchDone = true
+	} else if *batch_size_seconds > 0 &&
+		len(batch.Lines) > 0 &&
+		math.Abs(float64(batch.TimestampEnd)-float64(batch.TimestampStart)) >= float64(*batch_size_seconds) {
+
+		isBatchDone = true
+	}
+
+	if line != nil {
+		t.linesCounter += 1
+		if (t.linesCounter % int64(*progress)) == 0 {
+			log.Println("=> LINESD:",
+				"lines:", humanize.Comma(int64(t.linesCounter)),
+			)
 		}
+	}
 
-		if isBatchDone {
-			t.Data[streamAddress] = nil
-			t.conc.Execute(func() {
-				t.UploadBatch(batch)
-			})
-		}
+	if isBatchDone {
+		t.Data[*streamAddress] = nil
+		t.conc.Execute(func() {
+			t.UploadBatch(batch)
+		})
+	}
 
-		linesCounter += 1
+}
 
-		if err != nil {
-			break
+func (t *Server) ReadStdin() {
+	var err error
+	linesQueue := make(chan *string, 1000)
+	doneQueue := make(chan bool, 1)
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt)
+	signal.Notify(signals, os.Kill)
+	streamAddress := "stdin"
+	stream, ok := t.Config.Streams[streamAddress]
+
+	// processor:
+	if err == nil {
+		go func() {
+			isKeepWorking := true
+			if !ok {
+				log.Fatalln("no stdin stream")
+			}
+			for isKeepWorking {
+				select {
+				case <-doneQueue:
+					isKeepWorking = false
+					break // the loop
+				case <-signals:
+					log.Println("EOF. SIGNAL.")
+					isKeepWorking = false
+					break
+
+				case line := <-linesQueue:
+					t.ProcessLine(&streamAddress, &stream, line)
+				case <-time.After(time.Second * 10):
+					t.ProcessLine(&streamAddress, &stream, nil)
+				}
+			}
+		}()
+	}
+
+	// reader:
+	if err == nil {
+		reader := bufio.NewReader(os.Stdin)
+		for true {
+			line, err := reader.ReadString('\n')
+			if err == io.EOF {
+				log.Println("LINESD: EOF.")
+				close(linesQueue)
+				break
+			}
+			CheckFatal(err)
+			line = strings.TrimSpace(line)
+			if len(line) == 0 {
+				continue
+				break
+			}
+			linesQueue <- &line
 		}
 	}
 }
@@ -318,6 +376,15 @@ func (t *Server) RunForever() {
 		labels,
 	)
 	err = prometheus.Register(t.Stats.Counters)
+	CheckFatal(err)
+
+	t.Stats.Gauges = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: SERVICE_NAME + "_gauges",
+			Help: "gauges"},
+		labels,
+	)
+	err = prometheus.Register(t.Stats.Gauges)
 	CheckFatal(err)
 
 	VersionExport := prometheus.NewCounterVec(
@@ -395,6 +462,7 @@ func (t *Server) RunForever() {
 		for streamAddress, batch := range t.Data {
 			log.Println("=> LINESD: FINALIZE:", streamAddress)
 			t.UploadBatch(batch)
+			log.Println("=> LINESD: FINALIZE:", streamAddress, "DONE.")
 		}
 
 		t.conc.Wait()

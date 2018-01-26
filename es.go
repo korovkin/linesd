@@ -21,7 +21,6 @@ func ElasticSearchPut(endpoint string, indexPrefix string, env string, itemType 
 				"_id":    itemId,
 				"_type":  itemType,
 				"_index": index,
-				// "retry_on_conflict": 3,
 			},
 		}
 		requestBody.WriteString(ToJsonStringNoIndent(update))
@@ -60,18 +59,24 @@ func ElasticSearchPut(endpoint string, indexPrefix string, env string, itemType 
 	responseBodyBytes, err := ioutil.ReadAll(resp.Body)
 	CheckNotFatal(err)
 
+	if err != nil && responseBodyBytes != nil {
+		log.Println("ERROR: responseBodyBytes:", string(responseBodyBytes))
+	}
+
 	if responseBodyBytes != nil {
 		esResp := map[string]interface{}{}
-		err = json.Unmarshal(responseBodyBytes, &esResp)
-		CheckNotFatal(err)
+		e := json.Unmarshal(responseBodyBytes, &esResp)
+		CheckNotFatal(e)
 
 		if resp.StatusCode != 200 {
-			log.Println("ES: RESPONSE:",
-				resp.StatusCode,
-				resp.Status,
-				string(responseBodyBytes),
-				ToJsonString(esResp),
-			)
+			{
+				log.Println("ES: RESPONSE:",
+					resp.StatusCode,
+					resp.Status,
+					// string(responseBodyBytes),
+					// ToJsonString(esResp),
+				)
+			}
 		}
 	}
 
