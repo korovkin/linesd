@@ -51,8 +51,8 @@ var (
 		8,
 		"concurrency limit for processing the lines")
 
-	is_log_lines = flag.Bool(
-		"is_log_lines",
+	is_show_lines = flag.Bool(
+		"is_show_lines",
 		false,
 		"log lines to stdout",
 	)
@@ -217,9 +217,9 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 		}
 		err := ElasticSearchPut(
 			t.Config.AWSElasticSearchURL,
-			"tlines",
+			fmt.Sprintf("tlines-%s-%s", t.hostname, batch.Name),
 			*env,
-			fmt.Sprintf("%s-%s", t.hostname, batch.Name),
+			"line",
 			items)
 		CheckNotFatal(err)
 
@@ -235,7 +235,7 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *string) {
 	now := time.Now()
 
-	if line != nil && *is_log_lines {
+	if line != nil && *is_show_lines {
 		fmt.Println("LINE:",
 			t.linesCounter,
 			"|",

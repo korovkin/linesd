@@ -6,12 +6,13 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
 func ElasticSearchPut(endpoint string, indexPrefix string, env string, itemType string, items map[string]interface{}) error {
 	curTime := time.Now()
-	index := indexPrefix + "-" + env + "-" + itemType + "-" + curTime.Format("200601")
+	index := strings.ToLower(indexPrefix + "-" + env + "-" + itemType + "-" + curTime.Format("200601"))
 	requestBody := bytes.NewBuffer([]byte{})
 
 	for itemId, item := range items {
@@ -69,14 +70,12 @@ func ElasticSearchPut(endpoint string, indexPrefix string, env string, itemType 
 		CheckNotFatal(e)
 
 		if resp.StatusCode != 200 {
-			{
-				log.Println("ES: RESPONSE:",
-					resp.StatusCode,
-					resp.Status,
-					// string(responseBodyBytes),
-					// ToJsonString(esResp),
-				)
-			}
+			log.Println("ES: RESPONSE:",
+				resp.StatusCode,
+				resp.Status,
+				string(responseBodyBytes),
+				ToJsonString(esResp),
+			)
 		}
 	}
 
