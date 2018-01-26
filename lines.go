@@ -123,7 +123,7 @@ type Server struct {
 func (s *Server) GenerateUniqueId(idType string) (string, string, time.Time) {
 	var i = (atomic.AddUint32(&s.count, 1)) % 0xFFFF
 	now := time.Now()
-	id := fmt.Sprintf("%04d%02d%02d_%02d%02d_%010X_m%04X_i%04X_%s",
+	id := fmt.Sprintf("%04d%02d%02d_%02d%02d_%010Xm%04Xi%04X_%s",
 		now.Year(),
 		now.Month(),
 		now.Day(),
