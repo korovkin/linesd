@@ -1,4 +1,3 @@
 
 travis:
-	go build -o linesd server/*.go
-
+	go build -o linesd cmd/linesd/*.go
