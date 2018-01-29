@@ -239,7 +239,7 @@ func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *
 		fmt.Println("LINE:",
 			t.linesCounter,
 			"|",
-			line)
+			*line)
 	}
 
 	t.Stats.Counters.WithLabelValues("log_lines_in", "").Inc()
