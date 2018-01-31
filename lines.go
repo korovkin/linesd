@@ -10,8 +10,10 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -82,15 +84,19 @@ var (
 )
 
 type ConfigStream struct {
-	Name string `json:"name"`
+	Name         string `json:"name"`
+	TaiCmd       string `json:"tail_cmd"`
+	TailFilename string `json:"tail_filename"`
+
+	batch *LinesBatch
 }
 
 type Config struct {
-	AWSRegion           string                  `json:"aws_region"`
-	AWSBucket           string                  `json:"aws_bucket"`
-	AWSKeyPrefix        string                  `json:"aws_key_prefix"`
-	AWSElasticSearchURL string                  `json:"aws_elastic_search"`
-	Streams             map[string]ConfigStream `json:"streams"`
+	AWSRegion           string                   `json:"aws_region"`
+	AWSBucket           string                   `json:"aws_bucket"`
+	AWSKeyPrefix        string                   `json:"aws_key_prefix"`
+	AWSElasticSearchURL string                   `json:"aws_elastic_search"`
+	Streams             map[string]*ConfigStream `json:"streams"`
 
 	awsKeyPrefixEnv string
 }
@@ -115,7 +121,6 @@ type Server struct {
 	count     uint32
 	hostname  string
 	machineId uint16
-	Data      map[string]*LinesBatch
 
 	linesCounter int64
 }
@@ -142,12 +147,9 @@ func (t *Server) Initialize() {
 	err = ReadJsonFile(*config, &t.Config)
 	CheckFatal(err)
 	t.Config.awsKeyPrefixEnv = t.Config.AWSKeyPrefix + "/" + *env
-
-	t.conc = limiter.NewConcurrencyLimiter(*conc_limit)
-
 	log.Println("LINESD: config:", ToJsonString(t.Config))
 
-	t.Data = map[string]*LinesBatch{}
+	t.conc = limiter.NewConcurrencyLimiter(*conc_limit)
 
 	t.hostname, _ = os.Hostname()
 	t.machineId, err = Lower16BitPrivateIP()
@@ -155,7 +157,6 @@ func (t *Server) Initialize() {
 }
 
 func (t *Server) UploadBatch(batch *LinesBatch) {
-
 	if batch == nil {
 		return
 	}
@@ -186,7 +187,7 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 		}
 
 		if err == nil {
-			log.Println("LINESD: S3 UPLOADED:", fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
+			log.Println("LINESD: S3:", batch.Name, len(batch.Lines), fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
 			t.Stats.Counters.WithLabelValues("log_lines_out", "").Add(float64(len(batch.Lines)))
 			t.Stats.Counters.WithLabelValues("log_batches_out", "").Inc()
 		} else {
@@ -224,7 +225,7 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 		CheckNotFatal(err)
 
 		if err == nil {
-			log.Println("LINESD: ES UPLOADED:", batch.BatchId)
+			log.Println("LINESD: ES:", batch.Name, len(batch.Lines), batch.BatchId)
 			t.Stats.Counters.WithLabelValues("log_batches_es_ok", "").Inc()
 		} else {
 			t.Stats.Counters.WithLabelValues("log_batches_es_err", CleanupStringASCII(err.Error(), true)).Inc()
@@ -236,23 +237,25 @@ func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *
 	now := time.Now()
 
 	if line != nil && *is_show_lines {
-		fmt.Println("LINE:",
+		fmt.Println(
+			"LINE:",
 			t.linesCounter,
+			stream.Name,
 			"|",
 			*line)
 	}
 
 	t.Stats.Counters.WithLabelValues("log_lines_in", "").Inc()
 
-	batch := t.Data[*streamAddress]
-	if batch == nil {
+	batch := stream.batch
+	if stream.batch == nil {
 		batch = &LinesBatch{}
 		id, _, now := t.GenerateUniqueId(ID_LINESD)
 		batch.Name = stream.Name
 		batch.BatchId = id
 		batch.TimestampStart = now.Unix()
 		batch.TimestampEnd = now.Unix()
-		t.Data[*streamAddress] = batch
+		stream.batch = batch
 		t.Stats.Counters.WithLabelValues("log_batches_in", "").Inc()
 	}
 
@@ -287,7 +290,7 @@ func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *
 	}
 
 	if isBatchDone {
-		t.Data[*streamAddress] = nil
+		stream.batch = nil
 		t.conc.Execute(func() {
 			t.UploadBatch(batch)
 		})
@@ -295,37 +298,56 @@ func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *
 
 }
 
-func (t *Server) ReadStdin() {
+func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 	var err error
+	var command *exec.Cmd
+	var stdoutStream io.ReadCloser = os.Stdin
+
+	if stream.TailFilename != "" {
+		if stream.TaiCmd == "" {
+			stream.TaiCmd = "/usr/bin/tail"
+		}
+		command = exec.Command(
+			stream.TaiCmd,
+			"-F",
+			stream.TailFilename,
+		)
+		command.Env = []string{
+			"LINESD=1",
+		}
+		log.Println("=> running tail:", command.Path, command.Args)
+		stdoutStream, err = command.StdoutPipe()
+		CheckFatal(err)
+
+		// run the tailer:
+		err = command.Start()
+		CheckFatal(err)
+	}
+
 	linesQueue := make(chan *string, 1000)
 	doneQueue := make(chan bool, 1)
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt)
 	signal.Notify(signals, os.Kill)
-	streamAddress := "stdin"
-	stream, ok := t.Config.Streams[streamAddress]
 
 	// processor:
 	if err == nil {
 		go func() {
 			isKeepWorking := true
-			if !ok {
-				log.Fatalln("no stdin stream")
-			}
-			for isKeepWorking {
+			for isKeepWorking == true {
 				select {
 				case <-doneQueue:
 					isKeepWorking = false
 					break // the loop
 				case <-signals:
-					log.Println("EOF. SIGNAL.")
+					log.Println(stream.Name, "EOF. SIGNAL.")
 					isKeepWorking = false
 					break
 
 				case line := <-linesQueue:
-					t.ProcessLine(&streamAddress, &stream, line)
+					t.ProcessLine(streamAddress, stream, line)
 				case <-time.After(time.Second * 10):
-					t.ProcessLine(&streamAddress, &stream, nil)
+					t.ProcessLine(streamAddress, stream, nil)
 				}
 			}
 		}()
@@ -333,23 +355,25 @@ func (t *Server) ReadStdin() {
 
 	// reader:
 	if err == nil {
-		reader := bufio.NewReader(os.Stdin)
+		reader := bufio.NewReader(stdoutStream)
 		for true {
 			line, err := reader.ReadString('\n')
 			if err == io.EOF {
-				log.Println("LINESD: EOF.")
+				log.Println(stream.Name, "LINESD: EOF.")
 				close(linesQueue)
 				break
 			}
 			CheckFatal(err)
 			line = strings.TrimSpace(line)
 			if len(line) == 0 {
+				log.Println(stream.Name, "empty line")
 				continue
 				break
 			}
 			linesQueue <- &line
 		}
 	}
+
 }
 
 func (t *Server) RunForever() {
@@ -362,7 +386,13 @@ func (t *Server) RunForever() {
 		fmt.Println(VERSION_NUMBER)
 		return
 	}
+
+	log.Println("proc config:", *config)
 	log.Println("proc version:", VERSION_NUMBER)
+	log.Println("proc batch_size_seconds:", *batch_size_seconds)
+	log.Println("proc batch_size_lines:", *batch_size_lines)
+	log.Println("proc is_show_batches:", *is_show_batches)
+	log.Println("proc is_show_lines:", *is_show_lines)
 
 	if *env != "dev" && *env != "prod" {
 		log.Fatalln("FATAL: invalid env:", *env)
@@ -465,16 +495,28 @@ func (t *Server) RunForever() {
 
 	defer func() {
 		// always drain the batches
-		for streamAddress, batch := range t.Data {
+		for streamAddress, stream := range t.Config.Streams {
+			if stream.batch == nil {
+				continue
+			}
+
 			log.Println("=> LINESD: FINALIZE:", streamAddress)
-			t.UploadBatch(batch)
+			t.UploadBatch(stream.batch)
 			log.Println("=> LINESD: FINALIZE:", streamAddress, "DONE.")
 		}
 
 		t.conc.Wait()
 	}()
 
-	// read stdin:
-	t.ReadStdin()
-
+	var wg sync.WaitGroup
+	for streamAddress, stream := range t.Config.Streams {
+		wg.Add(1)
+		sAddress := streamAddress
+		sStream := stream
+		go func() {
+			defer wg.Done()
+			t.ReadStream(&sAddress, sStream)
+		}()
+	}
+	wg.Wait()
 }
