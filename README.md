@@ -11,7 +11,7 @@ and / or Elastic Search cluster for indexing and searching.
 
 ## example
 
-the following example will consume lines from stdin and push batches of 60 lines / 60 seconds worth of data to S3 and Elastic Search.
+the following example will consume lines from stdin and push batches of 60 lines / 60 seconds worth of data to S3 bucket and/or Elastic Search cluster of your choice.
 
 ```
 while [ yes ] ; do date; sleep 1; done | \
@@ -20,8 +20,8 @@ while [ yes ] ; do date; sleep 1; done | \
        --batch_size_lines 60
 ```
 
-1. batches of data are accumulated in memory.
-2. https://github.com/prometheus is used for monitoring.
+batches of data are accumulated in memory before being uploaded.
+https://github.com/prometheus is used for monitoring health and perf of the running process.
 
 
 ## references
