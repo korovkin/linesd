@@ -269,14 +269,11 @@ func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *
 	}
 	isBatchDone := false
 
-	if *batch_size_lines > 0 && !isBatchDone &&
-		len(batch.Lines) > *batch_size_lines {
-
+	if *batch_size_lines > 0 && !isBatchDone && len(batch.Lines) > *batch_size_lines {
 		isBatchDone = true
 	} else if *batch_size_seconds > 0 &&
 		len(batch.Lines) > 0 &&
 		math.Abs(float64(batch.TimestampEnd)-float64(batch.TimestampStart)) >= float64(*batch_size_seconds) {
-
 		isBatchDone = true
 	}
 
@@ -334,18 +331,21 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 	if err == nil {
 		go func() {
 			isKeepWorking := true
+			defer t.ProcessLine(streamAddress, stream, nil)
+			defer func() {
+				doneQueue <- true
+			}()
 			for isKeepWorking == true {
 				select {
-				case <-doneQueue:
-					isKeepWorking = false
-					break // the loop
 				case <-signals:
 					log.Println(stream.Name, "EOF. SIGNAL.")
 					isKeepWorking = false
 					break
-
-				case line := <-linesQueue:
+				case line, isMore := <-linesQueue:
 					t.ProcessLine(streamAddress, stream, line)
+					if !isMore {
+						break
+					}
 				case <-time.After(time.Second * 10):
 					t.ProcessLine(streamAddress, stream, nil)
 				}
@@ -368,12 +368,17 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 			if len(line) == 0 {
 				log.Println(stream.Name, "empty line")
 				continue
-				break
 			}
 			linesQueue <- &line
 		}
 	}
 
+	if err == nil {
+		select {
+		case <-doneQueue:
+			log.Println(stream.Name, "DONE.")
+		}
+	}
 }
 
 func (t *Server) RunForever() {
