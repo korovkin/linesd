@@ -24,7 +24,7 @@ import (
 )
 
 const SERVICE_NAME = "linesd"
-const VERSION_NUMBER = "0.0.1"
+const VERSION_NUMBER = "0.0.2"
 const ID_LINESD = "LINESD"
 
 var (
