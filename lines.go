@@ -338,12 +338,14 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 			for isKeepWorking == true {
 				select {
 				case <-signals:
-					log.Println(stream.Name, "EOF. SIGNAL.")
+					log.Println(stream.Name, "SIGNAL.")
 					isKeepWorking = false
 					break
 				case line, isMore := <-linesQueue:
 					t.ProcessLine(streamAddress, stream, line)
 					if !isMore {
+						log.Println(stream.Name, "EOF.", isMore)
+						isKeepWorking = false
 						break
 					}
 				case <-time.After(time.Second * 10):
