@@ -3,22 +3,30 @@
     , "aws_bucket": "linesd"
     , "aws_key_prefix": "logs"
     , "aws_elastic_search": ""
+    , "conc_limit": 8
+    , "batch_size_in_lines": 5000
+    , "batch_size_in_seconds": 180
+    , "progress": 100
+    , "address": ":9400"
 
     , "streams" : {
         "stdin" : {
             "name": "stdin"
+            , "is_stdin": true
         }
-
+        , "writer" : {
+            "name": "writer"
+            , "is_writer": true
+        }
         , "t1": {
-            "name": "t1"
-            , "tail_cmd": "/usr/bin/tail"
-            , "tail_filename": "t1.log"
+           "name": "t1"
+           , "tail_cmd": "/usr/bin/tail"
+           , "tail_filename": "t1.log"
         }
-
         , "t2": {
-            "name": "t2"
-            , "tail_cmd": "/usr/bin/tail"
-            , "tail_filename": "t2.log"
+           "name": "t2"
+           , "tail_cmd": "/usr/bin/tail"
+           , "tail_filename": "t2.log"
         }
     }
 }

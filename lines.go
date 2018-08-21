@@ -27,66 +27,12 @@ const SERVICE_NAME = "linesd"
 const VERSION_NUMBER = "0.0.2"
 const ID_LINESD = "LINESD"
 
-var (
-	config = flag.String(
-		"config",
-		"config.json",
-		"config file")
-
-	version = flag.Bool(
-		"version",
-		false,
-		"show long version string")
-
-	address = flag.String(
-		"address",
-		":9400",
-		"HTTP server address")
-
-	env = flag.String(
-		"env",
-		"dev",
-		"prod / dev")
-
-	conc_limit = flag.Int(
-		"conc_limit",
-		8,
-		"concurrency limit for processing the lines")
-
-	is_show_lines = flag.Bool(
-		"is_show_lines",
-		false,
-		"log lines to stdout",
-	)
-
-	is_show_batches = flag.Bool(
-		"is_show_batches",
-		false,
-		"print the uploaded batches")
-
-	batch_size_seconds = flag.Int(
-		"batch_size_seconds",
-		180,
-		"batch size in seconds",
-	)
-
-	batch_size_lines = flag.Int(
-		"batch_size_lines",
-		5000,
-		"batch size in lines",
-	)
-
-	progress = flag.Int(
-		"progress",
-		100,
-		"progress debug prints",
-	)
-)
-
 type ConfigStream struct {
 	Name         string `json:"name"`
 	TaiCmd       string `json:"tail_cmd"`
 	TailFilename string `json:"tail_filename"`
+	IsWriter     bool   `json:"is_writer"`
+	IsStdin      bool   `json:"is_stdin"`
 
 	batch *LinesBatch
 }
@@ -96,6 +42,14 @@ type Config struct {
 	AWSBucket           string                   `json:"aws_bucket"`
 	AWSKeyPrefix        string                   `json:"aws_key_prefix"`
 	AWSElasticSearchURL string                   `json:"aws_elastic_search"`
+	Env                 string                   `json:"env"`
+	ConcLimit           int                      `json:"conc_limit"`
+	IsShowBatches       bool                     `json:"is_show_batches"`
+	IsShowLines         bool                     `json:"is_show_lines"`
+	BatchSizeInLines    int                      `json:"batch_size_in_lines"`
+	BatchSizeInSeconds  int                      `json:"batch_size_in_seconds"`
+	Progress            int                      `json:"progress"`
+	Address             string                   `json:"address"`
 	Streams             map[string]*ConfigStream `json:"streams"`
 
 	awsKeyPrefixEnv string
@@ -115,12 +69,13 @@ type LinesBatch struct {
 }
 
 type Server struct {
-	Stats     Stats
-	Config    Config
-	conc      *limiter.ConcurrencyLimiter
-	count     uint32
-	hostname  string
-	machineId uint16
+	Stats               Stats
+	Config              Config
+	conc                *limiter.ConcurrencyLimiter
+	count               uint32
+	hostname            string
+	machineId           uint16
+	writerStreamChannel chan []byte
 
 	linesCounter int64
 }
@@ -141,16 +96,28 @@ func (s *Server) GenerateUniqueId(idType string) (string, string, time.Time) {
 	return id, id[0:8], now
 }
 
-func (t *Server) Initialize() {
+func (t *Server) Initialize(config *Config) {
 	var err error
 
-	err = ReadJsonFile(*config, &t.Config)
-	CheckFatal(err)
-	t.Config.awsKeyPrefixEnv = t.Config.AWSKeyPrefix + "/" + *env
-	log.Println("LINESD: config:", ToJsonString(t.Config))
+	t.Config = *config
 
-	t.conc = limiter.NewConcurrencyLimiter(*conc_limit)
+	if t.Config.Env == "" {
+		t.Config.Env = "dev"
+	}
 
+	if t.Config.BatchSizeInLines == 0 && t.Config.BatchSizeInSeconds == 0 {
+		fmt.Println("FATAL: must set batch_size_in_lines or batch_size_in_seconds")
+		return
+	}
+
+	if t.Config.ConcLimit <= 0 {
+		t.Config.ConcLimit = 8
+	}
+
+	t.writerStreamChannel = make(chan []byte, 5000)
+	t.Config.awsKeyPrefixEnv = t.Config.AWSKeyPrefix + "/" + t.Config.Env
+	fmt.Println("LINESD: config:", ToJsonString(t.Config))
+	t.conc = limiter.NewConcurrencyLimiter(t.Config.ConcLimit)
 	t.hostname, _ = os.Hostname()
 	t.machineId, err = Lower16BitPrivateIP()
 	CheckFatal(err)
@@ -182,12 +149,12 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 		)
 		CheckNotFatal(err)
 
-		if *is_show_batches {
-			log.Println("BATCH:", ToJsonString(batch))
+		if t.Config.IsShowBatches {
+			fmt.Println("BATCH:", ToJsonString(batch))
 		}
 
 		if err == nil {
-			log.Println("LINESD: S3:", batch.Name, len(batch.Lines), fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
+			fmt.Println("LINESD: S3:", batch.Name, len(batch.Lines), fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
 			t.Stats.Counters.WithLabelValues("log_lines_out", "").Add(float64(len(batch.Lines)))
 			t.Stats.Counters.WithLabelValues("log_batches_out", "").Inc()
 		} else {
@@ -219,13 +186,13 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 		err := ElasticSearchPut(
 			t.Config.AWSElasticSearchURL,
 			fmt.Sprintf("tlines-%s-%s", t.hostname, batch.Name),
-			*env,
+			t.Config.Env,
 			"line",
 			items)
 		CheckNotFatal(err)
 
 		if err == nil {
-			log.Println("LINESD: ES:", batch.Name, len(batch.Lines), batch.BatchId)
+			fmt.Println("LINESD: ES:", batch.Name, len(batch.Lines), batch.BatchId)
 			t.Stats.Counters.WithLabelValues("log_batches_es_ok", "").Inc()
 		} else {
 			t.Stats.Counters.WithLabelValues("log_batches_es_err", CleanupStringASCII(err.Error(), true)).Inc()
@@ -236,7 +203,7 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *string) {
 	now := time.Now()
 
-	if line != nil && *is_show_lines {
+	if line != nil && t.Config.IsShowLines {
 		fmt.Println(
 			"LINE:",
 			t.linesCounter,
@@ -269,17 +236,17 @@ func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *
 	}
 	isBatchDone := false
 
-	if *batch_size_lines > 0 && !isBatchDone && len(batch.Lines) > *batch_size_lines {
+	if t.Config.BatchSizeInLines > 0 && !isBatchDone && len(batch.Lines) > t.Config.BatchSizeInLines {
 		isBatchDone = true
-	} else if *batch_size_seconds > 0 &&
+	} else if t.Config.BatchSizeInSeconds > 0 &&
 		len(batch.Lines) > 0 &&
-		math.Abs(float64(batch.TimestampEnd)-float64(batch.TimestampStart)) >= float64(*batch_size_seconds) {
+		math.Abs(float64(batch.TimestampEnd)-float64(batch.TimestampStart)) >= float64(t.Config.BatchSizeInSeconds) {
 		isBatchDone = true
 	}
 
 	if line != nil {
 		t.linesCounter += 1
-		if (t.linesCounter % int64(*progress)) == 0 {
+		if (t.linesCounter % int64(t.Config.Progress)) == 0 {
 			log.Println("=> LINESD:",
 				"lines:", humanize.Comma(int64(t.linesCounter)),
 			)
@@ -298,9 +265,11 @@ func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *
 func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 	var err error
 	var command *exec.Cmd
-	var inputStream io.ReadCloser = os.Stdin
+	var inputStream io.ReadCloser = nil
 
-	if stream.TailFilename != "" {
+	if stream.IsStdin {
+		inputStream = os.Stdin
+	} else if stream.TailFilename != "" {
 		if stream.TaiCmd == "" {
 			stream.TaiCmd = "/usr/bin/tail"
 		}
@@ -312,13 +281,16 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 		command.Env = []string{
 			"LINESD=1",
 		}
-		log.Println("=> running tail:", command.Path, command.Args)
+		fmt.Println("=> running tail:", command.Path, command.Args)
 		inputStream, err = command.StdoutPipe()
 		CheckFatal(err)
 
 		// run the tailer:
 		err = command.Start()
 		CheckFatal(err)
+	} else if stream.IsWriter {
+	} else {
+		panic(errors.New("unknown stream type: " + stream.Name))
 	}
 
 	linesQueue := make(chan *string, 1000)
@@ -333,22 +305,25 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 			isKeepWorking := true
 			defer t.ProcessLine(streamAddress, stream, nil)
 			defer func() {
-				log.Println(stream.Name, "TAILER: DONE:")
+				fmt.Println(stream.Name, "TAILER: DONE")
 				doneQueue <- true
 			}()
 			for isKeepWorking == true {
 				select {
 				case s := <-signals:
-					log.Println(stream.Name, "SIGNAL:", s.String())
+					fmt.Println(stream.Name, "SIGNAL:", s.String())
 					if inputStream != nil {
 						inputStream.Close()
+					}
+					if stream.IsWriter {
+						close(t.writerStreamChannel)
 					}
 					isKeepWorking = false
 					break
 				case line, isMore := <-linesQueue:
 					t.ProcessLine(streamAddress, stream, line)
 					if !isMore {
-						log.Println(stream.Name, "EOF.", isMore)
+						fmt.Println(stream.Name, "EOF.", isMore)
 						isKeepWorking = false
 						break
 					}
@@ -359,35 +334,66 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 		}()
 	}
 
-	// reader:
-	if err == nil {
+	// stdin / file reader:
+	if err == nil && inputStream != nil {
 		reader := bufio.NewReader(inputStream)
 		for true {
 			line, err := reader.ReadString('\n')
 			if err != nil {
-				log.Println(stream.Name, "LINESD: EOF:", err.Error())
+				fmt.Println(stream.Name, "LINESD: EOF:", err.Error())
 				close(linesQueue)
 				break
 			}
 
 			line = strings.TrimSpace(line)
 			if len(line) == 0 {
-				log.Println(stream.Name, "LINESD: empty line")
+				fmt.Println(stream.Name, "LINESD: EMPTY LINE")
 				continue
 			}
 
-			log.Println(stream.Name, "LINESD: line:", line)
+			fmt.Println(stream.Name, "LINESD: LINE:", line)
 			linesQueue <- &line
 		}
-		log.Println("READER: DONE")
+		fmt.Println(stream.Name, "READER: DONE")
+	}
+
+	// writer reader:
+	if err == nil && stream.IsWriter {
+		for isKeepWorking := true; isKeepWorking; {
+			select {
+			case b, more := <-t.writerStreamChannel:
+				if len(b) == 0 || b == nil || more == false {
+					fmt.Println(stream.Name, "WRITER: DONE")
+					isKeepWorking = false
+					close(linesQueue)
+					break
+				}
+				line := string(b)
+				linesQueue <- &line
+				break
+			}
+		}
+		fmt.Println(stream.Name, "WRITER: DONE")
 	}
 
 	if err == nil {
 		select {
 		case <-doneQueue:
-			log.Println(stream.Name, "DONE.")
+			fmt.Println(stream.Name, "DONE: ACK")
 		}
 	}
+}
+
+func (t *Server) Write(p []byte) (n int, err error) {
+	err = nil
+	n = 0
+
+	if p != nil && len(p) > 0 {
+		fmt.Println("WRITER: WRITE", len(p))
+		t.writerStreamChannel <- p
+	}
+
+	return len(p), err
 }
 
 func (t *Server) RunForever() {
@@ -395,27 +401,6 @@ func (t *Server) RunForever() {
 
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lshortfile | log.Lmicroseconds | log.Ldate)
-
-	if *version {
-		fmt.Println(VERSION_NUMBER)
-		return
-	}
-
-	log.Println("proc config:", *config)
-	log.Println("proc version:", VERSION_NUMBER)
-	log.Println("proc batch_size_seconds:", *batch_size_seconds)
-	log.Println("proc batch_size_lines:", *batch_size_lines)
-	log.Println("proc is_show_batches:", *is_show_batches)
-	log.Println("proc is_show_lines:", *is_show_lines)
-
-	if *env != "dev" && *env != "prod" {
-		log.Fatalln("FATAL: invalid env:", *env)
-		return
-	}
-
-	if *batch_size_lines == 0 && *batch_size_seconds == 0 {
-		log.Fatalln("must pick at least one of batch_size_seconds / batch_size_lines")
-	}
 
 	// stats:
 	labels := []string{"name", "arg"}
@@ -465,7 +450,7 @@ func (t *Server) RunForever() {
 			default:
 				errorString = "unknown error"
 			}
-			log.Println("ERROR:", errorString)
+			fmt.Println("ERROR:", errorString)
 			http.Error(c, "error: "+errorString, http.StatusBadRequest)
 			t.Stats.Counters.WithLabelValues("request_error"+path, errorString).Inc()
 		} else {
@@ -502,9 +487,10 @@ func (t *Server) RunForever() {
 	})
 
 	go func() {
-		log.Println("=> LINESD: METRICS ADDRESS:", *address)
-		err = http.ListenAndServe(*address, nil)
+		fmt.Println("=> LINESD: METRICS ADDRESS:", t.Config.Address)
+		err = http.ListenAndServe(t.Config.Address, nil)
 		CheckFatal(err)
+		fmt.Println("=> LINESD: METRICS ADDRESS:", t.Config.Address, "DONE")
 	}()
 
 	defer func() {
@@ -514,9 +500,9 @@ func (t *Server) RunForever() {
 				continue
 			}
 
-			log.Println("=> LINESD: FINALIZE:", streamAddress)
+			fmt.Println("=> LINESD: FINALIZE:", streamAddress)
 			t.UploadBatch(stream.batch)
-			log.Println("=> LINESD: FINALIZE:", streamAddress, "DONE.")
+			fmt.Println("=> LINESD: FINALIZE:", streamAddress, "DONE.")
 		}
 
 		t.conc.Wait()
