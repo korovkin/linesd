@@ -298,7 +298,7 @@ func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *
 func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 	var err error
 	var command *exec.Cmd
-	var stdoutStream io.ReadCloser = os.Stdin
+	var inputStream io.ReadCloser = os.Stdin
 
 	if stream.TailFilename != "" {
 		if stream.TaiCmd == "" {
@@ -313,7 +313,7 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 			"LINESD=1",
 		}
 		log.Println("=> running tail:", command.Path, command.Args)
-		stdoutStream, err = command.StdoutPipe()
+		inputStream, err = command.StdoutPipe()
 		CheckFatal(err)
 
 		// run the tailer:
@@ -333,12 +333,16 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 			isKeepWorking := true
 			defer t.ProcessLine(streamAddress, stream, nil)
 			defer func() {
+				log.Println(stream.Name, "TAILER: DONE:")
 				doneQueue <- true
 			}()
 			for isKeepWorking == true {
 				select {
-				case <-signals:
-					log.Println(stream.Name, "SIGNAL.")
+				case s := <-signals:
+					log.Println(stream.Name, "SIGNAL:", s.String())
+					if inputStream != nil {
+						inputStream.Close()
+					}
 					isKeepWorking = false
 					break
 				case line, isMore := <-linesQueue:
@@ -357,22 +361,25 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 
 	// reader:
 	if err == nil {
-		reader := bufio.NewReader(stdoutStream)
+		reader := bufio.NewReader(inputStream)
 		for true {
 			line, err := reader.ReadString('\n')
-			if err == io.EOF {
-				log.Println(stream.Name, "LINESD: EOF.")
+			if err != nil {
+				log.Println(stream.Name, "LINESD: EOF:", err.Error())
 				close(linesQueue)
 				break
 			}
-			CheckFatal(err)
+
 			line = strings.TrimSpace(line)
 			if len(line) == 0 {
-				log.Println(stream.Name, "empty line")
+				log.Println(stream.Name, "LINESD: empty line")
 				continue
 			}
+
+			log.Println(stream.Name, "LINESD: line:", line)
 			linesQueue <- &line
 		}
+		log.Println("READER: DONE")
 	}
 
 	if err == nil {
