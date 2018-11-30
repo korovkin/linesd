@@ -24,7 +24,7 @@ import (
 )
 
 const SERVICE_NAME = "linesd"
-const VERSION_NUMBER = "0.0.2"
+const VERSION_NUMBER = "0.0.3"
 const ID_LINESD = "LINESD"
 
 type ConfigStream struct {
@@ -205,7 +205,7 @@ func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *
 
 	if line != nil && t.Config.IsShowLines {
 		fmt.Println(
-			"LINE:",
+			"LINESD: LINE:",
 			t.linesCounter,
 			stream.Name,
 			"|",
@@ -305,13 +305,13 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 			isKeepWorking := true
 			defer t.ProcessLine(streamAddress, stream, nil)
 			defer func() {
-				fmt.Println(stream.Name, "TAILER: DONE")
+				fmt.Println(stream.Name, "LINESD: TAILER: DONE")
 				doneQueue <- true
 			}()
 			for isKeepWorking == true {
 				select {
 				case s := <-signals:
-					fmt.Println(stream.Name, "SIGNAL:", s.String())
+					fmt.Println(stream.Name, "LINESD: SIGNAL:", s.String())
 					if inputStream != nil {
 						inputStream.Close()
 					}
@@ -323,7 +323,7 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 				case line, isMore := <-linesQueue:
 					t.ProcessLine(streamAddress, stream, line)
 					if !isMore {
-						fmt.Println(stream.Name, "EOF.", isMore)
+						fmt.Println(stream.Name, "LINESD: EOF.", isMore)
 						isKeepWorking = false
 						break
 					}
@@ -350,11 +350,12 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 				fmt.Println(stream.Name, "LINESD: EMPTY LINE")
 				continue
 			}
-
-			fmt.Println(stream.Name, "LINESD: LINE:", line)
+			if t.Config.IsShowLines {
+				fmt.Println(stream.Name, "LINESD: LINE:", line)
+			}
 			linesQueue <- &line
 		}
-		fmt.Println(stream.Name, "READER: DONE")
+		fmt.Println(stream.Name, "LINESD: READER: DONE")
 	}
 
 	// writer reader:
@@ -363,7 +364,7 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 			select {
 			case b, more := <-t.writerStreamChannel:
 				if len(b) == 0 || b == nil || more == false {
-					fmt.Println(stream.Name, "WRITER: DONE")
+					fmt.Println(stream.Name, "LINESD: WRITER: DONE")
 					isKeepWorking = false
 					close(linesQueue)
 					break
@@ -373,13 +374,13 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 				break
 			}
 		}
-		fmt.Println(stream.Name, "WRITER: DONE")
+		fmt.Println(stream.Name, "LINESD: WRITER: DONE")
 	}
 
 	if err == nil {
 		select {
 		case <-doneQueue:
-			fmt.Println(stream.Name, "DONE: ACK")
+			fmt.Println(stream.Name, "LINESD: DONE: ACK")
 		}
 	}
 }
@@ -389,7 +390,7 @@ func (t *Server) Write(p []byte) (n int, err error) {
 	n = 0
 
 	if p != nil && len(p) > 0 {
-		fmt.Println("WRITER: WRITE", len(p))
+		fmt.Println("LINESD: WRITER: WRITE", len(p))
 		t.writerStreamChannel <- p
 	}
 
