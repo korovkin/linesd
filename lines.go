@@ -83,12 +83,15 @@ type Server struct {
 func (s *Server) GenerateUniqueId(idType string) (string, string, time.Time) {
 	var i = (atomic.AddUint32(&s.count, 1)) % 0xFFFF
 	now := time.Now()
-	id := fmt.Sprintf("%04d%02d%02d_%02d%02d_%010Xm%04Xi%04X_%s",
+	id := fmt.Sprintf("%04d%02d%02d_%02d%02d%02d_%010Xm%04Xi%04X_%s",
 		now.Year(),
 		now.Month(),
 		now.Day(),
+
 		now.Hour(),
 		now.Minute(),
+		now.Second(),
+
 		now.Nanosecond(),
 		s.machineId,
 		i,
@@ -154,7 +157,7 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 		}
 
 		if err == nil {
-			fmt.Println("LINESD: S3:", batch.Name, len(batch.Lines), fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
+			fmt.Println("LINESD: LINELINESD: S3:", batch.Name, len(batch.Lines), fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
 			t.Stats.Counters.WithLabelValues("log_lines_out", "").Add(float64(len(batch.Lines)))
 			t.Stats.Counters.WithLabelValues("log_batches_out", "").Inc()
 		} else {
@@ -350,9 +353,9 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 				fmt.Println(stream.Name, "LINESD: EMPTY LINE")
 				continue
 			}
-			if t.Config.IsShowLines {
-				fmt.Println(stream.Name, "LINESD: LINE:", line)
-			}
+			// if t.Config.IsShowLines {
+			// 	fmt.Println(stream.Name, "LINESD: LINE:", line)
+			// }
 			linesQueue <- &line
 		}
 		fmt.Println(stream.Name, "LINESD: READER: DONE")
