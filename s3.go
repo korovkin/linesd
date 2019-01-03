@@ -2,6 +2,7 @@ package linesd
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"io/ioutil"
@@ -20,6 +21,7 @@ var (
 
 func S3PutLocalFile(
 	region *string,
+	timeout time.Duration,
 	bucketName string,
 	localFilename string,
 	remoteFilename string,
@@ -30,6 +32,13 @@ func S3PutLocalFile(
 	// 	DT := time.Since(S)
 	// 	log.Println("S3PutLocalFile: DT:", DT.Seconds(), bucketName, remoteFilename)
 	// }()
+
+	ctx := context.Background()
+	var ctxCancelFn func()
+	if timeout > 0 {
+		ctx, ctxCancelFn = context.WithTimeout(ctx, timeout)
+	}
+	defer ctxCancelFn()
 
 	var res *s3.PutObjectOutput = nil
 
@@ -57,13 +66,13 @@ func S3PutLocalFile(
 	}
 
 	params := &s3.PutObjectInput{
-		Bucket: aws.String(bucketName),
-		Key:    aws.String(remoteFilename),
-		Body:   f,
+		Bucket:      aws.String(bucketName),
+		Key:         aws.String(remoteFilename),
+		Body:        f,
+		ContentType: &contentType,
 	}
 
-	params.ContentType = &contentType
-	res, err = svc.PutObject(params)
+	res, err = svc.PutObjectWithContext(ctx, params)
 	CheckNotFatal(err)
 
 	if err != nil {
@@ -75,6 +84,7 @@ func S3PutLocalFile(
 
 func S3PutBlob(
 	region *string,
+	timeout time.Duration,
 	bucketName string,
 	blob []byte,
 	remoteFilename string,
@@ -88,6 +98,13 @@ func S3PutBlob(
 	// 		"DT:",
 	// 		time.Since(S))
 	// }()
+
+	ctx := context.Background()
+	var ctxCancelFn func()
+	if timeout > 0 {
+		ctx, ctxCancelFn = context.WithTimeout(ctx, timeout)
+	}
+	defer ctxCancelFn()
 
 	var res *s3.PutObjectOutput = nil
 	tfilesURL := ""
@@ -112,13 +129,13 @@ func S3PutBlob(
 	}
 
 	params := &s3.PutObjectInput{
-		Bucket: aws.String(bucketName),
-		Key:    aws.String(remoteFilename),
-		Body:   bytes.NewReader(blob),
+		Bucket:      aws.String(bucketName),
+		Key:         aws.String(remoteFilename),
+		Body:        bytes.NewReader(blob),
+		ContentType: &contentType,
 	}
 
-	params.ContentType = &contentType
-	res, err = svc.PutObject(params)
+	res, err = svc.PutObjectWithContext(ctx, params)
 	CheckNotFatal(err)
 
 	if err != nil {

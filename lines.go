@@ -51,6 +51,7 @@ type Config struct {
 	Progress            int                      `json:"progress"`
 	Address             string                   `json:"address"`
 	Streams             map[string]*ConfigStream `json:"streams"`
+	TimeoutSeconds      int                      `json:"timeout_seconds"`
 
 	awsKeyPrefixEnv string
 }
@@ -117,6 +118,10 @@ func (t *Server) Initialize(config *Config) {
 		t.Config.ConcLimit = 8
 	}
 
+	if t.Config.TimeoutSeconds <= 0 {
+		t.Config.TimeoutSeconds = 60
+	}
+
 	t.writerStreamChannel = make(chan []byte, 5000)
 	t.Config.awsKeyPrefixEnv = t.Config.AWSKeyPrefix + "/" + t.Config.Env
 	fmt.Println("LINESD: config:", ToJsonString(t.Config))
@@ -145,6 +150,7 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 
 		_, _, err := S3PutBlob(
 			&t.Config.AWSRegion,
+			time.Duration(t.Config.TimeoutSeconds)*time.Second,
 			s3Bucket,
 			ToJsonBytes(batch),
 			s3Key,
@@ -187,6 +193,7 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 			items[itemId] = item
 		}
 		err := ElasticSearchPut(
+			time.Duration(t.Config.TimeoutSeconds)*time.Second,
 			t.Config.AWSElasticSearchURL,
 			fmt.Sprintf("tlines-%s-%s", t.hostname, batch.Name),
 			t.Config.Env,

@@ -68,6 +68,11 @@ var (
 		100,
 		"progress debug prints",
 	)
+
+	timeout_seconds = flag.Int(
+		"timeout_seconds",
+		30,
+		"upload timeout in seconds")
 )
 
 func main() {
@@ -94,6 +99,7 @@ func main() {
 	config.BatchSizeInSeconds = *batch_size_seconds
 	config.BatchSizeInLines = *batch_size_lines
 	config.ConcLimit = *conc_limit
+	config.TimeoutSeconds = *timeout_seconds
 
 	// create a linesd instance:
 	s := &linesd.Server{}

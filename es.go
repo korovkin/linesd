@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func ElasticSearchPut(endpoint string, indexPrefix string, env string, itemType string, items map[string]interface{}) error {
+func ElasticSearchPut(timeout time.Duration, endpoint string, indexPrefix string, env string, itemType string, items map[string]interface{}) error {
 	curTime := time.Now()
 	index := strings.ToLower(indexPrefix + "-" + env + "-" + itemType + "-" + curTime.Format("200601"))
 	requestBody := bytes.NewBuffer([]byte{})
@@ -49,6 +49,7 @@ func ElasticSearchPut(endpoint string, indexPrefix string, env string, itemType 
 	req.Header.Set("Content-Type", CONTENT_TYPE_JSON)
 
 	client := &http.Client{}
+	client.Timeout = timeout
 	resp, err := client.Do(req)
 	CheckNotFatal(err)
 	if err != nil {
