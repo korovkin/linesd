@@ -62,7 +62,7 @@ func ElasticSearchPut(timeout time.Duration, endpoint string, indexPrefix string
 	CheckNotFatal(err)
 
 	if err != nil && responseBodyBytes != nil {
-		log.Println("ERROR: responseBodyBytes:", string(responseBodyBytes))
+		log.Println("LINESD: ERROR: responseBodyBytes:", string(responseBodyBytes))
 	}
 
 	if responseBodyBytes != nil {
@@ -71,7 +71,7 @@ func ElasticSearchPut(timeout time.Duration, endpoint string, indexPrefix string
 		CheckNotFatal(e)
 
 		if resp.StatusCode != 200 {
-			log.Println("ES: RESPONSE:",
+			log.Println("LINESD: ES: RESPONSE:",
 				resp.StatusCode,
 				resp.Status,
 				string(responseBodyBytes),

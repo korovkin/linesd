@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"io/ioutil"
+	"log"
 	"os"
 	"time"
 
@@ -27,11 +28,10 @@ func S3PutLocalFile(
 	remoteFilename string,
 	contentType string) (*s3.PutObjectOutput, string, error) {
 
-	// S := time.Now()
-	// defer func() {
-	// 	DT := time.Since(S)
-	// 	log.Println("S3PutLocalFile: DT:", DT.Seconds(), bucketName, remoteFilename)
-	// }()
+	S := time.Now()
+	defer func() {
+		log.Println("LINESD: S3PutLocalFile: DT:", time.Since(S).Seconds(), bucketName, remoteFilename)
+	}()
 
 	ctx := context.Background()
 	var ctxCancelFn func()
@@ -91,13 +91,11 @@ func S3PutBlob(
 	contentType string,
 ) (*s3.PutObjectOutput, string, error) {
 
-	// S := time.Now()
-	// defer func() {
-	// 	log.Println(
-	// 		"S3PutBlob:",
-	// 		"DT:",
-	// 		time.Since(S))
-	// }()
+	S := time.Now()
+	defer func() {
+		log.Println(
+			"LINESD: S3PutBlob:", "DT:", time.Since(S).Seconds(), bucketName, remoteFilename)
+	}()
 
 	ctx := context.Background()
 	var ctxCancelFn func()

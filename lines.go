@@ -110,7 +110,7 @@ func (t *Server) Initialize(config *Config) {
 	}
 
 	if t.Config.BatchSizeInLines == 0 && t.Config.BatchSizeInSeconds == 0 {
-		fmt.Println("FATAL: must set batch_size_in_lines or batch_size_in_seconds")
+		fmt.Println("LINESD: FATAL: must set batch_size_in_lines or batch_size_in_seconds")
 		return
 	}
 
@@ -159,11 +159,11 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 		CheckNotFatal(err)
 
 		if t.Config.IsShowBatches {
-			fmt.Println("BATCH:", ToJsonString(batch))
+			fmt.Println("LINESD: BATCH:", ToJsonString(batch))
 		}
 
 		if err == nil {
-			fmt.Println("LINESD: LINELINESD: S3:", batch.Name, len(batch.Lines), fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
+			fmt.Println("LINESD: S3:", batch.Name, len(batch.Lines), fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
 			t.Stats.Counters.WithLabelValues("log_lines_out", "").Add(float64(len(batch.Lines)))
 			t.Stats.Counters.WithLabelValues("log_batches_out", "").Inc()
 		} else {
@@ -214,8 +214,7 @@ func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *
 	now := time.Now()
 
 	if line != nil && t.Config.IsShowLines {
-		fmt.Println(
-			"LINESD: LINE:",
+		fmt.Println("LINESD: LINE:",
 			t.linesCounter,
 			stream.Name,
 			"|",
@@ -257,9 +256,7 @@ func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *
 	if line != nil {
 		t.linesCounter += 1
 		if (t.linesCounter % int64(t.Config.Progress)) == 0 {
-			log.Println("=> LINESD:",
-				"lines:", humanize.Comma(int64(t.linesCounter)),
-			)
+			log.Println("LINESD: PROGRESS:", humanize.Comma(int64(t.linesCounter)))
 		}
 	}
 
@@ -291,7 +288,7 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 		command.Env = []string{
 			"LINESD=1",
 		}
-		fmt.Println("=> running tail:", command.Path, command.Args)
+		fmt.Println("LINESD: running tail:", command.Path, command.Args)
 		inputStream, err = command.StdoutPipe()
 		CheckFatal(err)
 
@@ -461,7 +458,7 @@ func (t *Server) RunForever() {
 			default:
 				errorString = "unknown error"
 			}
-			fmt.Println("ERROR:", errorString)
+			fmt.Println("LINESD: ERROR:", errorString)
 			http.Error(c, "error: "+errorString, http.StatusBadRequest)
 			t.Stats.Counters.WithLabelValues("request_error"+path, errorString).Inc()
 		} else {
@@ -498,10 +495,10 @@ func (t *Server) RunForever() {
 	})
 
 	go func() {
-		fmt.Println("=> LINESD: METRICS ADDRESS:", t.Config.Address)
+		fmt.Println("LINESD: METRICS ADDRESS:", t.Config.Address)
 		err = http.ListenAndServe(t.Config.Address, nil)
 		CheckFatal(err)
-		fmt.Println("=> LINESD: METRICS ADDRESS:", t.Config.Address, "DONE")
+		fmt.Println("LINESD: METRICS ADDRESS:", t.Config.Address, "DONE")
 	}()
 
 	defer func() {
@@ -511,9 +508,9 @@ func (t *Server) RunForever() {
 				continue
 			}
 
-			fmt.Println("=> LINESD: FINALIZE:", streamAddress)
+			fmt.Println("LINESD: FINALIZE:", streamAddress)
 			t.UploadBatch(stream.batch)
-			fmt.Println("=> LINESD: FINALIZE:", streamAddress, "DONE.")
+			fmt.Println("LINESD: FINALIZE:", streamAddress, "DONE.")
 		}
 
 		t.conc.Wait()

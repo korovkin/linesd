@@ -71,7 +71,7 @@ func ToJsonStringNoIndent(v interface{}) string {
 func CheckFatal(e error) error {
 	if e != nil {
 		debug.PrintStack()
-		log.Println("CHECK: ERROR:", e)
+		log.Println("LINESD: CHECK: FATAL: ERROR:", e)
 		panic(e)
 	}
 	return e
@@ -80,7 +80,7 @@ func CheckFatal(e error) error {
 func CheckNotFatal(e error) error {
 	if e != nil {
 		debug.PrintStack()
-		log.Println("CHECK: ERROR:", e.Error())
+		log.Println("LINESD: CHECK: NOT_FATAL: ERROR:", e.Error())
 	}
 	return e
 }
@@ -122,7 +122,7 @@ func HttpGetJson(url string, o interface{}, username string, password string,
 	timeout time.Duration) error {
 
 	var err error = nil
-	log.Println("HTTP_GET: JSON:", url)
+	log.Println("LINESD: HTTP_GET: JSON:", url)
 	body := []byte{}
 
 	if strings.HasPrefix(url, "http") {
