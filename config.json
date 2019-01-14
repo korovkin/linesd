@@ -14,10 +14,6 @@
             "name": "stdin"
             , "is_stdin": true
         }
-        , "writer" : {
-            "name": "writer"
-            , "is_writer": true
-        }
         , "t1": {
            "name": "t1"
            , "tail_cmd": "/usr/bin/tail"

@@ -32,7 +32,7 @@ var (
 
 	conc_limit = flag.Int(
 		"conc_limit",
-		8,
+		20,
 		"concurrency limit for processing the lines")
 
 	is_show_lines = flag.Bool(
@@ -73,6 +73,16 @@ var (
 		"timeout_seconds",
 		30,
 		"upload timeout in seconds")
+
+	log_folder = flag.String(
+		"log_folder",
+		"",
+		"destination for local rotated logs")
+
+	log_file_size_bytes = flag.Int(
+		"log_file_size_bytes",
+		100*1024,
+		"rotated log files size in bytes")
 )
 
 func main() {
@@ -100,6 +110,8 @@ func main() {
 	config.BatchSizeInLines = *batch_size_lines
 	config.ConcLimit = *conc_limit
 	config.TimeoutSeconds = *timeout_seconds
+	config.LogFilesFileSizeBytes = *log_file_size_bytes
+	config.LogFilesFolder = *log_folder
 
 	// create a linesd instance:
 	s := &linesd.Server{}
@@ -107,7 +119,6 @@ func main() {
 	// load the config:
 	s.Initialize(config)
 
-	// optional: write 'log' lines to stderr and linesd
 	if *is_overload_log {
 		log.SetOutput(io.MultiWriter(os.Stderr, s))
 	}

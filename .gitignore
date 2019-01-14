@@ -14,5 +14,7 @@
 .glide/
 /linesd
 
+/_log
+
 t1.log
 t2.log

@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,16 +26,19 @@ import (
 )
 
 const SERVICE_NAME = "linesd"
-const VERSION_NUMBER = "0.0.3"
+const VERSION_NUMBER = "0.0.4"
 const ID_LINESD = "LINESD"
+const LOG_FILES_MAX_NUM = 10
+const LOG_FILES_EXT = ".log"
+const LOG_FILES_CURRENT_LOG = "current" + LOG_FILES_EXT
 
 type ConfigStream struct {
 	Name         string `json:"name"`
 	TaiCmd       string `json:"tail_cmd"`
 	TailFilename string `json:"tail_filename"`
-	IsWriter     bool   `json:"is_writer"`
 	IsStdin      bool   `json:"is_stdin"`
 
+	// private:
 	batch *LinesBatch
 }
 
@@ -51,9 +56,15 @@ type Config struct {
 	Progress            int                      `json:"progress"`
 	Address             string                   `json:"address"`
 	Streams             map[string]*ConfigStream `json:"streams"`
-	TimeoutSeconds      int                      `json:"timeout_seconds"`
 
-	awsKeyPrefixEnv string
+	// HTTP timeout:
+	TimeoutSeconds int `json:"timeout_seconds"`
+	// log to local files as well:
+	LogFilesFolder string `json:"log_files_folder"`
+	// max local file size in bytes:
+	LogFilesFileSizeBytes int `json:"log_files_size_bytes"`
+	// S3 destination prefix:
+	AWSKeyPrefixEnv string
 }
 
 type Stats struct {
@@ -63,6 +74,7 @@ type Stats struct {
 
 type LinesBatch struct {
 	Name           string    `json:"name"`
+	Hostname       string    `json:"hostname"`
 	BatchId        string    `json:"batch_id"`
 	TimestampStart int64     `json:"ts_start"`
 	TimestampEnd   int64     `json:"ts_end"`
@@ -70,19 +82,26 @@ type LinesBatch struct {
 }
 
 type Server struct {
-	Stats               Stats
-	Config              Config
-	conc                *limiter.ConcurrencyLimiter
-	count               uint32
-	hostname            string
-	machineId           uint16
-	writerStreamChannel chan []byte
-
+	Stats  Stats
+	Config Config
+	// conc limiter to upload files to S3/ES
+	conc *limiter.ConcurrencyLimiter
+	// unique / atomic id:
+	uniqueId uint32
+	// hostname:
+	hostname string
+	// machine id;
+	machineId uint16
+	// monotonic line counter:
 	linesCounter int64
+	// current opened file:
+	currentFile          *os.File
+	currentFilename      string
+	currnetFileSizeBytes int
 }
 
 func (s *Server) GenerateUniqueId(idType string) (string, string, time.Time) {
-	var i = (atomic.AddUint32(&s.count, 1)) % 0xFFFF
+	var i = (atomic.AddUint32(&s.uniqueId, 1)) % 0xFFFF
 	now := time.Now()
 	id := fmt.Sprintf("%04d%02d%02d_%02d%02d%02d_%010Xm%04Xi%04X_%s",
 		now.Year(),
@@ -122,12 +141,23 @@ func (t *Server) Initialize(config *Config) {
 		t.Config.TimeoutSeconds = 60
 	}
 
-	t.writerStreamChannel = make(chan []byte, 5000)
-	t.Config.awsKeyPrefixEnv = t.Config.AWSKeyPrefix + "/" + t.Config.Env
+	if t.Config.LogFilesFolder != "" {
+		os.MkdirAll(t.Config.LogFilesFolder, 0777)
+	}
+
+	const MIN_LOG_FILE_SIZE = 200
+
+	if t.Config.LogFilesFileSizeBytes <= MIN_LOG_FILE_SIZE {
+		t.Config.LogFilesFileSizeBytes = MIN_LOG_FILE_SIZE
+	}
+
+	t.Config.AWSKeyPrefixEnv = t.Config.AWSKeyPrefix + "/" + t.Config.Env
 	fmt.Println("LINESD: config:", ToJsonString(t.Config))
-	t.conc = limiter.NewConcurrencyLimiter(t.Config.ConcLimit)
+
 	t.hostname, _ = os.Hostname()
 	t.machineId, err = Lower16BitPrivateIP()
+	t.conc = limiter.NewConcurrencyLimiter(t.Config.ConcLimit)
+
 	CheckFatal(err)
 }
 
@@ -141,7 +171,7 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 		s3Bucket := t.Config.AWSBucket
 		s3Key := fmt.Sprintf(
 			"%s/%s/%s/%s/%s.json",
-			t.Config.awsKeyPrefixEnv,
+			t.Config.AWSKeyPrefixEnv,
 			t.hostname,
 			batch.Name,
 			batch.BatchId[0:8],
@@ -210,6 +240,96 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 	}
 }
 
+func (t *Server) ProcessLineToLocalFile(streamAddress *string, stream *ConfigStream, line *string) {
+	if line == nil || len(*line) <= 0 {
+		return
+	}
+	var e error
+	var bytesAdded int
+
+	// open a new file:
+	if t.currentFile == nil {
+		filename, _, _ := t.GenerateUniqueId("LOG")
+		filename += LOG_FILES_EXT
+		absFilename := fmt.Sprintf("%s/%s", t.Config.LogFilesFolder, filename)
+
+		// convert to ABS filename:
+		absFilename, e = filepath.Abs(absFilename)
+		CheckNotFatal(e)
+
+		log.Println("LINESD: NEW FILE:", absFilename)
+		t.currentFile, e = os.OpenFile(absFilename, os.O_WRONLY|os.O_CREATE, 0777)
+		t.currnetFileSizeBytes = 0
+		CheckNotFatal(e)
+		if e == nil {
+			t.currentFilename = absFilename
+		}
+
+		// update "<log_folder>/current" link
+		absFilenameCurrent := fmt.Sprintf("%s/%s", t.Config.LogFilesFolder, LOG_FILES_CURRENT_LOG)
+		os.Remove(absFilenameCurrent)
+		os.Symlink(absFilename, absFilenameCurrent)
+
+		t.Stats.Counters.WithLabelValues("log_lines_files_opened", "").Inc()
+	}
+
+	// append to the file:
+	if t.currentFile != nil {
+		bytesAdded, e = t.currentFile.Write([]byte(*line + "\n"))
+		CheckNotFatal(e)
+
+		if e == nil {
+			t.currnetFileSizeBytes += bytesAdded
+			t.currentFile.Sync()
+		}
+	}
+
+	// check if the file needs to be closed:
+	isCleanLogFiles := false
+	if t.currentFile != nil && t.currnetFileSizeBytes >= t.Config.LogFilesFileSizeBytes {
+		t.currnetFileSizeBytes = 0
+		t.currentFile.Close()
+		t.currentFile = nil
+		log.Println("LINESD: CLOSE FILE:", t.currentFilename)
+		t.currentFilename = ""
+		t.Stats.Counters.WithLabelValues("log_lines_files_closed", "").Inc()
+		isCleanLogFiles = true
+	}
+
+	// walk the folder and cleanup old files
+	if isCleanLogFiles {
+		currentLogFiles := []string{}
+		filepath.Walk(
+			t.Config.LogFilesFolder,
+			func(path string, info os.FileInfo, err error) error {
+				CheckNotFatal(err)
+				_, filename := filepath.Split(path)
+				if info.IsDir() && path != t.Config.LogFilesFolder {
+					return filepath.SkipDir
+				}
+				if filepath.Ext(filename) != LOG_FILES_EXT || filename == LOG_FILES_CURRENT_LOG {
+					return nil
+				}
+				if info.IsDir() || !info.Mode().IsRegular() {
+					return nil
+				}
+				currentLogFiles = append(currentLogFiles, path)
+				return nil
+			})
+
+		// sort by filename (thus by time)
+		sort.Sort(sort.StringSlice(currentLogFiles))
+
+		for len(currentLogFiles) > LOG_FILES_MAX_NUM {
+			oldestFilename := currentLogFiles[0]
+			log.Println("LINESD: DELETE FILE:", len(currentLogFiles), oldestFilename)
+			os.RemoveAll(oldestFilename)
+			currentLogFiles = currentLogFiles[1:]
+			t.Stats.Counters.WithLabelValues("log_lines_files_deleted", "").Inc()
+		}
+	}
+}
+
 func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *string) {
 	now := time.Now()
 
@@ -223,11 +343,14 @@ func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *
 
 	t.Stats.Counters.WithLabelValues("log_lines_in", "").Inc()
 
+	t.ProcessLineToLocalFile(streamAddress, stream, line)
+
 	batch := stream.batch
 	if stream.batch == nil {
 		batch = &LinesBatch{}
 		id, _, now := t.GenerateUniqueId(ID_LINESD)
 		batch.Name = stream.Name
+		batch.Hostname = t.hostname
 		batch.BatchId = id
 		batch.TimestampStart = now.Unix()
 		batch.TimestampEnd = now.Unix()
@@ -243,13 +366,15 @@ func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *
 		batch.Lines = append(batch.Lines, line)
 		batch.TimestampEnd = now.Unix()
 	}
-	isBatchDone := false
 
+	isBatchDone := false
 	if t.Config.BatchSizeInLines > 0 && !isBatchDone && len(batch.Lines) > t.Config.BatchSizeInLines {
+
 		isBatchDone = true
 	} else if t.Config.BatchSizeInSeconds > 0 &&
 		len(batch.Lines) > 0 &&
 		math.Abs(float64(batch.TimestampEnd)-float64(batch.TimestampStart)) >= float64(t.Config.BatchSizeInSeconds) {
+
 		isBatchDone = true
 	}
 
@@ -295,7 +420,6 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 		// run the tailer:
 		err = command.Start()
 		CheckFatal(err)
-	} else if stream.IsWriter {
 	} else {
 		panic(errors.New("unknown stream type: " + stream.Name))
 	}
@@ -321,9 +445,6 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 					fmt.Println(stream.Name, "LINESD: SIGNAL:", s.String())
 					if inputStream != nil {
 						inputStream.Close()
-					}
-					if stream.IsWriter {
-						close(t.writerStreamChannel)
 					}
 					isKeepWorking = false
 					break
@@ -365,25 +486,6 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 		fmt.Println(stream.Name, "LINESD: READER: DONE")
 	}
 
-	// writer reader:
-	if err == nil && stream.IsWriter {
-		for isKeepWorking := true; isKeepWorking; {
-			select {
-			case b, more := <-t.writerStreamChannel:
-				if len(b) == 0 || b == nil || more == false {
-					fmt.Println(stream.Name, "LINESD: WRITER: DONE")
-					isKeepWorking = false
-					close(linesQueue)
-					break
-				}
-				line := string(b)
-				linesQueue <- &line
-				break
-			}
-		}
-		fmt.Println(stream.Name, "LINESD: WRITER: DONE")
-	}
-
 	if err == nil {
 		select {
 		case <-doneQueue:
@@ -392,14 +494,15 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 	}
 }
 
+// This will be called from log.print* function as log.SetOutput was called on it
 func (t *Server) Write(p []byte) (n int, err error) {
-	err = nil
-	n = 0
-
-	if p != nil && len(p) > 0 {
-		fmt.Println("LINESD: WRITER: WRITE", len(p))
-		t.writerStreamChannel <- p
-	}
+	// err = nil
+	// n = 0
+	// if p != nil && len(p) > 0 {
+	// 	fmt.Println("LINESD: WRITER:",
+	// 		len(p),
+	// 		"P {{", string(p), "}}")
+	// }
 
 	return len(p), err
 }
