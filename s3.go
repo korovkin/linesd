@@ -91,11 +91,11 @@ func S3PutBlob(
 	contentType string,
 ) (*s3.PutObjectOutput, string, error) {
 
-	S := time.Now()
-	defer func() {
-		log.Println(
-			"LINESD: S3PutBlob:", "DT:", time.Since(S).Seconds(), bucketName, remoteFilename)
-	}()
+	// S := time.Now()
+	// defer func() {
+	// 	log.Println(
+	// 		"LINESD: S3PutBlob:", "DT:", time.Since(S).Seconds(), bucketName, remoteFilename)
+	// }()
 
 	ctx := context.Background()
 	var ctxCancelFn func()

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -97,6 +98,7 @@ type Server struct {
 	// current opened file:
 	currentFile          *os.File
 	currentFilename      string
+	currentFileLock      sync.Mutex
 	currnetFileSizeBytes int
 }
 
@@ -133,6 +135,36 @@ func (t *Server) Initialize(config *Config) {
 		return
 	}
 
+	// stats:
+	labels := []string{"name", "arg"}
+	t.Stats.Counters = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: SERVICE_NAME + "_counters",
+			Help: "counters"},
+		labels,
+	)
+	err = prometheus.Register(t.Stats.Counters)
+	CheckFatal(err)
+
+	t.Stats.Gauges = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: SERVICE_NAME + "_gauges",
+			Help: "gauges"},
+		labels,
+	)
+	err = prometheus.Register(t.Stats.Gauges)
+	CheckFatal(err)
+
+	VersionExport := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: SERVICE_NAME + "_version",
+			Help: "version number"},
+		[]string{"version", "hash"})
+	err = prometheus.Register(VersionExport)
+	CheckFatal(err)
+
+	VersionExport.WithLabelValues(VERSION_NUMBER, "").Inc()
+
 	if t.Config.ConcLimit <= 0 {
 		t.Config.ConcLimit = 8
 	}
@@ -145,14 +177,14 @@ func (t *Server) Initialize(config *Config) {
 		os.MkdirAll(t.Config.LogFilesFolder, 0777)
 	}
 
-	const MIN_LOG_FILE_SIZE = 200
+	const MIN_LOG_FILE_SIZE = 1024
 
 	if t.Config.LogFilesFileSizeBytes <= MIN_LOG_FILE_SIZE {
 		t.Config.LogFilesFileSizeBytes = MIN_LOG_FILE_SIZE
 	}
 
 	t.Config.AWSKeyPrefixEnv = t.Config.AWSKeyPrefix + "/" + t.Config.Env
-	fmt.Println("LINESD: config:", ToJsonString(t.Config))
+	t.AppendDebugLineToLogFile("LINESD: INITIALIZE: CONFIG: " + ToJsonString(t.Config))
 
 	t.hostname, _ = os.Hostname()
 	t.machineId, err = Lower16BitPrivateIP()
@@ -189,11 +221,11 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 		CheckNotFatal(err)
 
 		if t.Config.IsShowBatches {
-			fmt.Println("LINESD: BATCH:", ToJsonString(batch))
+			log.Println("LINESD: BATCH:", ToJsonString(batch))
 		}
 
 		if err == nil {
-			fmt.Println("LINESD: S3:", batch.Name, len(batch.Lines), fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
+			log.Println("LINESD: S3:", batch.Name, len(batch.Lines), fmt.Sprintf("s3://%s/%s", s3Bucket, s3Key))
 			t.Stats.Counters.WithLabelValues("log_lines_out", "").Add(float64(len(batch.Lines)))
 			t.Stats.Counters.WithLabelValues("log_batches_out", "").Inc()
 		} else {
@@ -232,7 +264,7 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 		CheckNotFatal(err)
 
 		if err == nil {
-			fmt.Println("LINESD: ES:", batch.Name, len(batch.Lines), batch.BatchId)
+			log.Println("LINESD: ES:", batch.Name, len(batch.Lines), batch.BatchId)
 			t.Stats.Counters.WithLabelValues("log_batches_es_ok", "").Inc()
 		} else {
 			t.Stats.Counters.WithLabelValues("log_batches_es_err", CleanupStringASCII(err.Error(), true)).Inc()
@@ -240,12 +272,17 @@ func (t *Server) UploadBatch(batch *LinesBatch) {
 	}
 }
 
-func (t *Server) ProcessLineToLocalFile(streamAddress *string, stream *ConfigStream, line *string) {
+func (t *Server) ProcessLineToLocalFile(line *string) {
 	if line == nil || len(*line) <= 0 {
 		return
 	}
 	var e error
 	var bytesAdded int
+
+	// IMPORTANT: this function is used by log.Write, thus log.Print* can't be called from this function
+
+	t.currentFileLock.Lock()
+	defer t.currentFileLock.Unlock()
 
 	// open a new file:
 	if t.currentFile == nil {
@@ -257,7 +294,11 @@ func (t *Server) ProcessLineToLocalFile(streamAddress *string, stream *ConfigStr
 		absFilename, e = filepath.Abs(absFilename)
 		CheckNotFatal(e)
 
-		log.Println("LINESD: NEW FILE:", absFilename)
+		fmt.Println("LINESD: NEW FILE:", absFilename)
+		go func() {
+			log.Println("LINESD: NEW FILE:", absFilename)
+		}()
+
 		t.currentFile, e = os.OpenFile(absFilename, os.O_WRONLY|os.O_CREATE, 0777)
 		t.currnetFileSizeBytes = 0
 		CheckNotFatal(e)
@@ -287,11 +328,15 @@ func (t *Server) ProcessLineToLocalFile(streamAddress *string, stream *ConfigStr
 	// check if the file needs to be closed:
 	isCleanLogFiles := false
 	if t.currentFile != nil && t.currnetFileSizeBytes >= t.Config.LogFilesFileSizeBytes {
+		currentFilename := t.currentFilename
+		t.currentFilename = ""
 		t.currnetFileSizeBytes = 0
 		t.currentFile.Close()
 		t.currentFile = nil
-		log.Println("LINESD: CLOSE FILE:", t.currentFilename)
-		t.currentFilename = ""
+		fmt.Println("LINESD: CLOSE FILE:", currentFilename)
+		go func() {
+			log.Println("LINESD: CLOSE FILE:", currentFilename)
+		}()
 		t.Stats.Counters.WithLabelValues("log_lines_files_closed", "").Inc()
 		isCleanLogFiles = true
 	}
@@ -322,7 +367,10 @@ func (t *Server) ProcessLineToLocalFile(streamAddress *string, stream *ConfigStr
 
 		for len(currentLogFiles) > LOG_FILES_MAX_NUM {
 			oldestFilename := currentLogFiles[0]
-			log.Println("LINESD: DELETE FILE:", len(currentLogFiles), oldestFilename)
+			fmt.Println("LINESD: DELETE FILE:", len(currentLogFiles), oldestFilename)
+			go func() {
+				log.Println("LINESD: DELETE FILE:", oldestFilename)
+			}()
 			os.RemoveAll(oldestFilename)
 			currentLogFiles = currentLogFiles[1:]
 			t.Stats.Counters.WithLabelValues("log_lines_files_deleted", "").Inc()
@@ -343,7 +391,7 @@ func (t *Server) ProcessLine(streamAddress *string, stream *ConfigStream, line *
 
 	t.Stats.Counters.WithLabelValues("log_lines_in", "").Inc()
 
-	t.ProcessLineToLocalFile(streamAddress, stream, line)
+	t.ProcessLineToLocalFile(line)
 
 	batch := stream.batch
 	if stream.batch == nil {
@@ -494,15 +542,36 @@ func (t *Server) ReadStream(streamAddress *string, stream *ConfigStream) {
 	}
 }
 
+func (t *Server) AppendDebugLineToLogFile(line string) {
+	now := time.Now()
+	_, fileName, lineNumber, ok := runtime.Caller(1)
+	if !ok {
+		fileName = "unknown"
+		lineNumber = 0
+	}
+	_, fileName = filepath.Split(fileName)
+	lineWithPrefix := fmt.Sprintf("LINESD: %02d%02d%02d_%02d%02d%02d %.3f %-12s %5d :: %s",
+		now.Year(),
+		now.Month(),
+		now.Day(),
+		now.Hour(),
+		now.Minute(),
+		now.Second(),
+		float64(now.UnixNano())/1000000000.0,
+		fileName,
+		lineNumber,
+		line,
+	)
+	t.ProcessLineToLocalFile(&lineWithPrefix)
+}
+
 // This will be called from log.print* function as log.SetOutput was called on it
 func (t *Server) Write(p []byte) (n int, err error) {
-	// err = nil
-	// n = 0
-	// if p != nil && len(p) > 0 {
-	// 	fmt.Println("LINESD: WRITER:",
-	// 		len(p),
-	// 		"P {{", string(p), "}}")
-	// }
+	err = nil
+	n = 0
+	if p != nil && len(p) > 0 {
+		t.AppendDebugLineToLogFile(strings.TrimSpace(string(p)))
+	}
 
 	return len(p), err
 }
@@ -513,35 +582,8 @@ func (t *Server) RunForever() {
 	flag.Parse()
 	log.SetFlags(log.Ltime | log.Lshortfile | log.Lmicroseconds | log.Ldate)
 
-	// stats:
-	labels := []string{"name", "arg"}
-	t.Stats.Counters = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: SERVICE_NAME + "_counters",
-			Help: "counters"},
-		labels,
-	)
-	err = prometheus.Register(t.Stats.Counters)
-	CheckFatal(err)
-
-	t.Stats.Gauges = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: SERVICE_NAME + "_gauges",
-			Help: "gauges"},
-		labels,
-	)
-	err = prometheus.Register(t.Stats.Gauges)
-	CheckFatal(err)
-
-	VersionExport := prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: SERVICE_NAME + "_version",
-			Help: "version number"},
-		[]string{"version", "hash"})
-	err = prometheus.Register(VersionExport)
-	CheckFatal(err)
-
-	VersionExport.WithLabelValues(VERSION_NUMBER, "").Inc()
+	// make an attempt to output lines to the log files as well:
+	log.SetOutput(io.MultiWriter(os.Stderr, t))
 
 	handlePanic := func(c http.ResponseWriter, req *http.Request) {
 		r := recover()
