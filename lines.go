@@ -27,7 +27,7 @@ import (
 )
 
 const SERVICE_NAME = "linesd"
-const VERSION_NUMBER = "0.0.4"
+const VERSION_NUMBER = "0.0.5"
 const ID_LINESD = "LINESD"
 const LOG_FILES_MAX_NUM = 10
 const LOG_FILES_EXT = ".log"
